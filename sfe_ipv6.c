@@ -1212,6 +1212,7 @@ int sfe_ipv6_recv(struct net_device *dev, struct sk_buff *skb, struct sfe_l2_inf
 	/*
 	 * Handle PPPoE bridge packets using 3-tuple acceleration if SFE_PPPOE_BR_ACCEL_MODE_EN_3T
 	 */
+#ifdef SFE_SUPPORT_PPPOE
 	if (unlikely(sfe_l2_parse_flag_check(l2_info, SFE_L2_PARSE_FLAGS_PPPOE_INGRESS)) &&
 	    unlikely(sfe_pppoe_get_br_accel_mode() == SFE_PPPOE_BR_ACCEL_MODE_EN_3T)) {
 		struct ethhdr *eth = eth_hdr(skb);
@@ -1219,7 +1220,7 @@ int sfe_ipv6_recv(struct net_device *dev, struct sk_buff *skb, struct sfe_l2_inf
 			return sfe_ipv6_recv_pppoe_bridge(si, skb, dev, len, iph, ihl, l2_info);
 		}
 	}
-
+#endif
 	if (IPPROTO_UDP == next_hdr) {
 		return sfe_ipv6_recv_udp(si, skb, dev, len, iph, ihl, sync_on_find, l2_info, tun_outer, is_frag, fhdr);
 	}

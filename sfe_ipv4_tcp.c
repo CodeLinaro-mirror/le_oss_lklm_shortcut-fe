@@ -711,8 +711,10 @@ int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 			return 0;
 		}
 #endif
+#ifdef SFE_SUPPORT_PPPOE
 		sfe_pppoe_add_header(skb, cm->pppoe_session_id, PPP_IP);
 		this_cpu_inc(si->stats_pcpu->pppoe_encap_packets_forwarded64);
+#endif
 	}
 
 	/*

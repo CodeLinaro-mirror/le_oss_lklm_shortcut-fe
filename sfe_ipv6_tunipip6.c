@@ -296,11 +296,12 @@ int sfe_ipv6_recv_tunipip6(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_
 	/*
 	 * For PPPoE flows, add PPPoE header before L2 header is added.
 	 */
+#ifdef SFE_SUPPORT_PPPOE
 	if (unlikely(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PPPOE_ENCAP)) {
 		sfe_pppoe_add_header(skb, cm->pppoe_session_id, PPP_IPV6);
 		this_cpu_inc(si->stats_pcpu->pppoe_encap_packets_forwarded64);
 	}
-
+#endif
 	/*
 	 * For trustsec flows, add trustsec header before L2 header is added.
 	 */

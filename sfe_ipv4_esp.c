@@ -347,11 +347,12 @@ int sfe_ipv4_recv_esp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 	/*
 	 * For PPPoE flows, add PPPoE header before L2 header is added.
 	 */
+#ifdef SFE_SUPPORT_PPPOE
 	if (unlikely(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_PPPOE_ENCAP)) {
 		sfe_pppoe_add_header(skb, cm->pppoe_session_id, PPP_IP);
 		this_cpu_inc(si->stats_pcpu->pppoe_encap_packets_forwarded64);
 	}
-
+#endif
 	/*
 	 * Check to see if we need to add VLAN tags
 	 */

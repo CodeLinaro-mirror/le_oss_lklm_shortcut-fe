@@ -846,6 +846,7 @@ static bool sfe_recv_parse_l2(struct net_device *dev, struct sk_buff *skb, struc
 	/*
 	 * Parse only PPPoE session packets
 	 */
+#ifdef SFE_SUPPORT_PPPOE
 	if (htons(ETH_P_PPP_SES) == skb->protocol) {
 		if (!sfe_pppoe_parse_hdr(skb, l2_info)) {
 
@@ -856,6 +857,7 @@ static bool sfe_recv_parse_l2(struct net_device *dev, struct sk_buff *skb, struc
 			return false;
 		}
 	}
+#endif
 	return true;
 }
 
@@ -874,8 +876,9 @@ void sfe_recv_undo_parse_l2(struct net_device *dev, struct sk_buff *skb, struct 
 	/*
 	 * PPPoE undo
 	 */
+#ifdef SFE_SUPPORT_PPPOE
 	sfe_pppoe_undo_parse(skb, l2_info);
-
+#endif
 	/*
 	 * Trustsec undo
 	 */
@@ -2450,6 +2453,8 @@ static const struct device_attribute sfe_l2_feature_attr =
  * sfe_get_pppoe_br_accel_mode()
  *	Get PPPoE bridge acceleration mode
  */
+
+#ifdef SFE_SUPPORT_PPPOE
 static ssize_t sfe_get_pppoe_br_accel_mode(struct device *dev,
 					struct device_attribute *attr,
 					char *buf)
@@ -2485,6 +2490,7 @@ static ssize_t sfe_get_pppoe_br_accel_mode(struct device *dev,
  * sfe_set_pppoe_br_accel_mode()
  *	Set PPPoE bridge acceleration mode
  */
+
 static ssize_t sfe_set_pppoe_br_accel_mode(struct device *dev,
 				struct device_attribute *attr,
 				const char *buf,
@@ -2515,6 +2521,7 @@ static ssize_t sfe_set_pppoe_br_accel_mode(struct device *dev,
 
 static const struct device_attribute sfe_pppoe_br_accel_mode_attr =
 	__ATTR(pppoe_br_accel_mode, 0644, sfe_get_pppoe_br_accel_mode, sfe_set_pppoe_br_accel_mode);
+#endif
 
 /*
  * sfe_get_tso_clear_fixed_id()
@@ -2684,11 +2691,13 @@ int sfe_init_if(void)
 	/*
 	 * Create sys/sfe/pppoe_br_accel_mode
 	 */
+#ifdef SFE_SUPPORT_PPPOE	
 	result = sysfs_create_file(sfe_ctx->sys_sfe, &sfe_pppoe_br_accel_mode_attr.attr);
 	if (result) {
 		DEBUG_ERROR("failed to create pppoe_br_accel_mode: %d\n", result);
 		goto exit2;
 	}
+#endif
 
 #if defined(SFE_RFS_SUPPORTED)
 	result = sysfs_create_file(sfe_ctx->sys_sfe, &sfe_ppe_rfs_feature_attr.attr);
@@ -2714,9 +2723,9 @@ int sfe_init_if(void)
 		DEBUG_ERROR("failed to register flush if fls breach sysfs file: %d\n", result);
 		goto exit2;
 	}
-
+#ifdef SFE_SUPPORT_PPPOE
 	sfe_pppoe_mgr_init();
-
+#endif
 	/*
 	 * Enable RFS by default
 	 */
@@ -2753,9 +2762,9 @@ void sfe_exit_if(void)
 	 * Unregister our receive callback.
 	 */
 	RCU_INIT_POINTER(athrs_fast_nat_recv, NULL);
-
+#ifdef SFE_SUPPORT_PPPOE
 	sfe_pppoe_mgr_exit();
-
+#endif
 	/*
 	 * Wait for all callbacks to complete.
 	 */

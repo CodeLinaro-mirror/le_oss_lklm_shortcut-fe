@@ -37,7 +37,11 @@ qca-nss-sfe-objs := $(SFE_BASE_OBJS)
 # IPv4 files
 #
 qca-nss-sfe-objs += $(SFE_IPV4_OBJS)
-#qca-nss-sfe-objs += $(SFE_PPPOE_OBJS)
+
+ifdef SFE_SUPPORT_PPPOE
+qca-nss-sfe-objs += $(SFE_PPPOE_OBJS)
+ccflags-y += -DSFE_SUPPORT_PPPOE
+endif
 
 ifdef SFE_SUPPORT_IPV6
 qca-nss-sfe-objs += $(SFE_IPV6_OBJS)

@@ -631,9 +631,10 @@ static int sfe_ipv6_frag_udp_forward(struct sfe_ipv6 *si, struct sk_buff *skb, s
 			sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_GSO_NOT_SUPPORTED);
 			return 0;
 		}
-
+#ifdef SFE_SUPPORT_PPPOE
 		sfe_pppoe_add_header(skb, cm->pppoe_session_id, PPP_IPV6);
 		this_cpu_inc(si->stats_pcpu->pppoe_encap_packets_forwarded64);
+#endif
 	}
 
 	/*

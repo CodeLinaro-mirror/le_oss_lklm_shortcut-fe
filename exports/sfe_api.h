@@ -1211,8 +1211,9 @@ extern bool sfe_ipv6_get_single_conn_stats(struct sfe_ipv6_single_conn_stats *st
  * @return
  * The acceleration mode.
  */
+#ifdef SFE_SUPPORT_PPPOE
 sfe_pppoe_br_accel_mode_t sfe_pppoe_get_br_accel_mode(void);
-
+#endif
 /**
  * Flow statistics connection create callback.
  *

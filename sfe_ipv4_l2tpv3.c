@@ -323,11 +323,12 @@ int sfe_ipv4_recv_l2tpv3(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_de
 	/*
 	 * For PPPoE flows, add PPPoE header before L2 header is added.
 	 */
+#ifdef SFE_SUPPORT_PPPOE
 	if (unlikely(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_PPPOE_ENCAP)) {
 		sfe_pppoe_add_header(skb, cm->pppoe_session_id, PPP_IP);
 		this_cpu_inc(si->stats_pcpu->pppoe_encap_packets_forwarded64);
 	}
-
+#endif
 	/*
 	 * For trustsec flows, add trustsec header before L2 header is added.
 	 */

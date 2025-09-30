@@ -52,12 +52,13 @@ int sfe_ipv4_forward_multicast(struct sfe_ipv4 *si, struct sk_buff *skb, unsigne
 	/*
 	 * For PPPoE flows, add PPPoE header before L2 header is added.
 	 */
+#ifdef SFE_SUPPORT_PPPOE
 	if (unlikely(mc_xmit_dev->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_PPPOE_ENCAP)) {
 		DEBUG_TRACE("%px: PPPoE added session id:%u \n", skb, mc_xmit_dev->pppoe_session_id);
 		sfe_pppoe_add_header(skb, mc_xmit_dev->pppoe_session_id, PPP_IP);
 		this_cpu_inc(si->stats_pcpu->pppoe_encap_packets_forwarded64);
 	}
-
+#endif
 	/*
 	 * Enable HW csum if rx checksum is verified and xmit interface is CSUM offload capable.
 	 * Note: If L4 csum at Rx was found to be incorrect, we (router) should use incremental L4 checksum here
