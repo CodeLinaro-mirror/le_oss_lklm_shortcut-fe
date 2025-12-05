@@ -3,7 +3,7 @@
  *	Shortcut forwarding engine - IPv4 UDP implementation
  *
  * Copyright (c) 2013-2016, 2019-2020, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,6 +18,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <linux/debug_mem_usage.h>
 #include <linux/skbuff.h>
 #include <net/udp.h>
 #include <linux/etherdevice.h>
@@ -168,6 +169,8 @@ int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 #ifdef SFE_SW_L4_CHECKSUM_VERIFICATION
 	struct net *net;
 #endif
+	struct netdev_hw_offload_ops *offload_ops = NULL;
+	bool tun_vp_tx = false;
 
 	/*
 	 * Is our packet too short to contain a valid UDP header?
@@ -321,7 +324,7 @@ int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 			return 0;
 		}
 		vlan_passthrough = true;
-		this_cpu_inc(si->stats_pcpu->bridge_vlan_passthorugh_forwarded64);
+		this_cpu_inc(si->stats_pcpu->bridge_vlan_passthrough_forwarded64);
 	}
 
 	/*
@@ -355,11 +358,12 @@ int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 	 * If our packet is larger than the fragment threshold / MTU of the transmit interface then
 	 * it has to be fragmented.
 	 */
-	DEBUG_TRACE("skb_len = %u, MTU = %u, skb_is_gso = %d\n", len, cm->xmit_dev_mtu, skb_is_gso(skb));
 	if (unlikely((len > cm->xmit_dev_mtu) && (!cm->up) && !skb_is_gso(skb))) {
+
 		/*
 		 * TODO: Use threshold packet size if specified.
 		 */
+		DEBUG_TRACE("skb_len = %u, MTU = %u, skb_is_gso = %d\n", len, cm->xmit_dev_mtu, skb_is_gso(skb));
 		skb_queue_head_init(&head);
 		ret = sfe_ipv4_frag_prepare(si, cm, skb, &head, iph);
 		if (ret != SFE_IPV4_EXCEPTION_EVENT_LAST) {
@@ -771,6 +775,7 @@ int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 	features = cm->features;
 
 	fast_xmit = !!(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_FAST_XMIT);
+	tun_vp_tx = !!(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID);
 
 	/*
 	 * In the map-t tunnel, it needs correct transport header.
@@ -785,13 +790,31 @@ int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 		return 1;
 	}
 
-	rcu_read_unlock();
 	this_cpu_inc(si->stats_pcpu->packets_forwarded64);
+
+	/*
+	 * For tunnel Packets check if tunnel is active in PPE.
+	 * If tunnel is active queue the packet to tunnel VP
+	 */
+	if (unlikely(tun_vp_tx)) {
+		offload_ops = rcu_dereference(xmit_dev->offload_ops);
+		if (likely(offload_ops && offload_ops->xmit)) {
+			mem_debug_update_skb(skb);
+			if (likely(offload_ops->xmit(xmit_dev, skb))) {
+				this_cpu_inc(si->stats_pcpu->ppe_tun_vp_tx64);
+				rcu_read_unlock();
+				return 1;
+			}
+		}
+	}
+
+	rcu_read_unlock();
 
 	/*
 	 * We do per packet condition check before we could fast xmit the
 	 * packet.
 	 */
+	mem_debug_update_skb(skb);
 	if (likely(fast_xmit && dev_fast_xmit(skb, xmit_dev, features))) {
 		this_cpu_inc(si->stats_pcpu->packets_fast_xmited64);
 		return 1;
@@ -812,12 +835,14 @@ int sfe_ipv4_recv_udp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 	 * check if fast qdisc xmit is enabled and send the packet on its way.
 	 */
 	if (cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_FAST_QDISC_XMIT) {
+		mem_debug_update_skb(skb);
 		if (likely(dev_fast_xmit_qdisc(skb, xmit_dev, cm->qdisc_xmit_dev))) {
 			this_cpu_inc(si->stats_pcpu->packets_fast_qdisc_xmited64);
 			return 1;
 		}
 	}
 
+	mem_debug_update_skb(skb);
 	dev_queue_xmit(skb);
 
 	return 1;

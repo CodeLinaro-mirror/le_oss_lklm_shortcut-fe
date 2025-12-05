@@ -3,7 +3,7 @@
  *	 SFE exported function headers for SFE engine.
  *
  * Copyright (c) 2015,2016, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -108,6 +108,8 @@
 #define SFE_RULE_CREATE_FLAG_BRIDGE_VLAN_PASSTHROUGH  (1<<18)	/**< Bridge VLAN passthrough. */
 #define SFE_RULE_CREATE_FLAG_FLOW_VXLAN_GPE (1<<19)		/**< VXLAN-GPE rule for original flow. */
 #define SFE_RULE_CREATE_FLAG_RETURN_VXLAN_GPE (1<<20)		/**< VXLAN-GPE rule for return flow. */
+#define SFE_RULE_CREATE_FLAG_FLOW_DEST_TUN_VP	 (1<<21) 	/**< TUNNEL VP is destination interface flow direction*/
+#define SFE_RULE_CREATE_FLAG_RETURN_DEST_TUN_VP	 (1<<22) 	/**< TUNNEL VP is destination interface in return direction*/
 
 /*
  * Rule creation validity flags.
@@ -224,6 +226,8 @@
 		/**< SAWF mark in the flow direction is valid. */
 #define SFE_SAWF_MARK_RETURN_VALID      (1<<1)
 		/**< SAWF mark in the return direction is valid. */
+#define SFE_SAWF_MARK_DEPRIO            (1<<2)
+		/**< SAWF mark is being set to reset queue of this flow */
 
 /**
  * @}
@@ -1181,9 +1185,9 @@ bool sfe_is_l2_feature_enabled(void);
  * @param	mark		The mark object.
  *
  * @return
- * None.
+ * True if mark update successful, false otherwise.
  */
-void sfe_ipv4_mark_rule_update(struct sfe_connection_mark *mark);
+bool sfe_ipv4_mark_rule_update(struct sfe_connection_mark *mark);
 
 /**
  * Updates mark values of an IPv6 connection.
@@ -1191,9 +1195,9 @@ void sfe_ipv4_mark_rule_update(struct sfe_connection_mark *mark);
  * @param	mark		The mark object.
  *
  * @return
- * None.
+ * True if mark update successful, false otherwise.
  */
-void sfe_ipv6_mark_rule_update(struct sfe_connection_mark *mark);
+bool sfe_ipv6_mark_rule_update(struct sfe_connection_mark *mark);
 
 /**
  * Allows netfn flowmgr to pull single Connection Stats from SFE

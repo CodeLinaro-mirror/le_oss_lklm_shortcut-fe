@@ -3,7 +3,7 @@
  *	Shortcut forwarding engine header file for IPv4.
  *
  * Copyright (c) 2013-2016, 2019-2020, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -25,6 +25,9 @@
 #define SFE_IPV4_DSCP_SHIFT 2
 #include <linux/version.h>
 #include <net/dst_cache.h>
+#if defined(SFE_RFS_SUPPORTED)
+#include <ppe_rfs.h>
+#endif
 
 /*
  * Size of single sfe_dump msg buffer
@@ -118,6 +121,8 @@ struct sfe_ipv4_vlan_filter_connection_match {
 					/* Skip fragmentation offload */
 #define SFE_IPV4_CONNECTION_MATCH_FLAG_VXLAN_GPE (1<<28)
 					/* VXLAN-GPE flow */
+#define SFE_IPV4_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID (1<<29)
+					/* TUN VP valid */
 
 /*
  * IPv4 multicast destination structure
@@ -297,6 +302,17 @@ struct sfe_ipv4_connection_match {
 	bool sawf_valid;		/* Indicates mark has valid SAWF information */
 	bool ingress_trustsec_valid;	/* Indicates trustsec header is valid */
 	struct dst_cache dst_cache;     /* Destination route cache */
+
+#if defined(SFE_RFS_SUPPORTED)
+	bool rfs_enabled;		/* Stores information of RFS eligibility for the connection entry. */
+	u32 flow_mtu;			/* Store flow mtu to pass directly to RFS create rule. */
+	u32 return_mtu;			/* Store return mtu to pass directly to RFS create rule. */
+	s32 flow_interface_num;		/* Store namely interface number to pass directly to RFS create rule. */
+	s32 flow_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
+	s32 return_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
+	s32 return_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
+
+#endif
 };
 
 /*
@@ -455,7 +471,8 @@ struct sfe_ipv4_stats {
 	u64 pppoe_bridge_packets_forwarded64;	/* Number of IPv4 PPPoE bridge packets forwarded */
 	u64 pppoe_bridge_packets_3tuple_forwarded64;    /* Number of IPv4 PPPoE bridge packets forwarded based on 3-tuple info */
 	u64 connection_create_requests_overflow64;	/* Number of IPV4 connection create requests after reaching max limit */
-	u64 bridge_vlan_passthorugh_forwarded64;	/* Number of IPV4 bridge vlan passthrough packets forwarded */
+	u64 bridge_vlan_passthrough_forwarded64;	/* Number of IPV4 bridge vlan passthrough packets forwarded */
+	u64 ppe_tun_vp_tx64;				/* Number of IPV4 packets queued to PPE tunnel VP  */
 };
 
 /*
@@ -566,8 +583,8 @@ bool sfe_ipv4_remove_connection(struct sfe_ipv4 *si, struct sfe_ipv4_connection 
 void sfe_ipv4_flush_connection(struct sfe_ipv4 *si, struct sfe_ipv4_connection *c, sfe_rule_sync_reason_t reason);
 void sfe_ipv4_sync_status(struct sfe_ipv4 *si, struct sfe_ipv4_connection *c, sfe_rule_sync_reason_t reason);
 #if defined(SFE_RFS_SUPPORTED)
-void sfe_ipv4_fill_connection_info(struct sfe_ipv4_rule_destroy_msg *msg, struct net_device **original_dev, struct net_device **reply_dev, uint32_t *flow_ip,
-				uint16_t *flow_ident, uint32_t *return_ip, uint16_t *return_ident);
+void sfe_ipv4_connection_rule_rfs_valid_set(struct sfe_ipv4_connection_match *match);
+struct sfe_ipv4_connection *sfe_ipv4_connection_rule_get_by_tuple(struct sfe_ipv4_5tuple *tuple);
 #endif
 struct sfe_ipv4_connection_match *
 sfe_ipv4_find_connection_match_rcu(struct sfe_ipv4 *si, struct net_device *dev, u8 protocol,

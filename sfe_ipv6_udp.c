@@ -3,7 +3,7 @@
  *	Shortcut forwarding engine file for IPv6 UDP
  *
  * Copyright (c) 2015-2016, 2019-2020, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,6 +18,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <linux/debug_mem_usage.h>
 #include <linux/skbuff.h>
 #include <net/udp.h>
 #include <linux/etherdevice.h>
@@ -79,6 +80,7 @@ static int sfe_ipv6_udp_sk_deliver(struct sk_buff *skb, struct sfe_ipv6_connecti
 		 */
 		if (unlikely(udp6_csum_init(skb, udp_hdr(skb), IPPROTO_UDP))) {
 			DEBUG_ERROR("sfe: udp checksum init() failed: %p\n", skb);
+			mem_debug_update_skb(skb);
 			kfree_skb(skb);
 			return -1;
 		}
@@ -88,6 +90,7 @@ static int sfe_ipv6_udp_sk_deliver(struct sk_buff *skb, struct sfe_ipv6_connecti
 		 */
 		if (unlikely(udp_lib_checksum_complete(skb))) {
 			DEBUG_ERROR("sfe: Invalid udp checksum: %p\n", skb);
+			mem_debug_update_skb(skb);
 			kfree_skb(skb);
 			return -1;
 		}
@@ -151,6 +154,8 @@ int sfe_ipv6_recv_udp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 #ifdef SFE_SW_L4_CHECKSUM_VERIFICATION
 	struct net *net;
 #endif
+	struct netdev_hw_offload_ops *offload_ops = NULL;
+	bool tun_vp_tx = false;
 
 	DEBUG_TRACE("%px: sfe: sfe_ipv6_recv_udp called.\n", skb);
 
@@ -243,7 +248,7 @@ int sfe_ipv6_recv_udp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 			return 0;
 		}
 		vlan_passthrough = true;
-		this_cpu_inc(si->stats_pcpu->bridge_vlan_passthorugh_forwarded64);
+		this_cpu_inc(si->stats_pcpu->bridge_vlan_passthrough_forwarded64);
 	}
 
 	/*
@@ -278,6 +283,7 @@ int sfe_ipv6_recv_udp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	}
 
 	if (unlikely(cm->fls_conn && !(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_FLS_DISABLED))){
+		update_cb = rcu_dereference(sfe_fls_info.stats_update_cb);
 		if (likely(update_cb)) {
 			fls_ret = update_cb(cm->fls_conn, skb);
 			if (!(fls_ret & SFE_FLS_CONNECTION_FLAG_DEF_ENABLE) || fls_ret & SFE_FLS_CONNECTION_FLAG_HWM_EXCEEDED)
@@ -346,8 +352,8 @@ int sfe_ipv6_recv_udp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	 * If our packet is larger than the MTU of the transmit interface then
 	 * we can't forward it easily.
 	 */
-	DEBUG_TRACE("skb_len = %u, MTU = %u, skb_is_gso = %d\n", len, cm->xmit_dev_mtu, skb_is_gso(skb));
 	if (unlikely((len > cm->xmit_dev_mtu) && (!cm->up) && !skb_is_gso(skb))) {
+		DEBUG_TRACE("skb_len = %u, MTU = %u, skb_is_gso = %d\n", len, cm->xmit_dev_mtu, skb_is_gso(skb));
 		sfe_ipv6_sync_status(si, cm->connection, SFE_RULE_SYNC_REASON_STATS);
 		rcu_read_unlock();
 
@@ -758,15 +764,33 @@ int sfe_ipv6_recv_udp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	features = cm->features;
 
 	fast_xmit = !!(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_FAST_XMIT);
-
-	rcu_read_unlock();
+	tun_vp_tx = !!(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID);
 
 	this_cpu_inc(si->stats_pcpu->packets_forwarded64);
+
+	/*
+	 * For tunnel Packets check if tunnel is active in PPE.
+	 * If tunnel is active queue the packet to tunnel VP
+	 */
+	if (unlikely(tun_vp_tx)) {
+		offload_ops = rcu_dereference(xmit_dev->offload_ops);
+		if (likely(offload_ops && offload_ops->xmit)) {
+			mem_debug_update_skb(skb);
+			if (likely(offload_ops->xmit(xmit_dev, skb))) {
+				this_cpu_inc(si->stats_pcpu->ppe_tun_vp_tx64);
+				rcu_read_unlock();
+				return 1;
+			}
+		}
+	}
+
+	rcu_read_unlock();
 
 	/*
 	 * We do per packet condition check before we could fast xmit the
 	 * packet.
 	 */
+	mem_debug_update_skb(skb);
 	if (likely(fast_xmit && dev_fast_xmit(skb, xmit_dev, features))) {
 		this_cpu_inc(si->stats_pcpu->packets_fast_xmited64);
 		return 1;
@@ -787,12 +811,14 @@ int sfe_ipv6_recv_udp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	 * check if fast qdisc xmit is enabled and send the packet on its way.
 	 */
 	if (cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_FAST_QDISC_XMIT) {
+		mem_debug_update_skb(skb);
 		if (likely(dev_fast_xmit_qdisc(skb, xmit_dev, cm->qdisc_xmit_dev))) {
 			this_cpu_inc(si->stats_pcpu->packets_fast_qdisc_xmited64);
 			return 1;
 		}
 	}
 
+	mem_debug_update_skb(skb);
 	dev_queue_xmit(skb);
 
 	return 1;

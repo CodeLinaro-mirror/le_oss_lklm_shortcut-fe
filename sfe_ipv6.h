@@ -3,7 +3,7 @@
  *	Shortcut forwarding engine header file for IPv6.
  *
  * Copyright (c) 2015-2016, 2019-2020, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -22,6 +22,9 @@
 #define __SFE_IPV6_H
 
 #include <net/dst_cache.h>
+#if defined(SFE_RFS_SUPPORTED)
+#include <ppe_rfs.h>
+#endif
 
 #define SFE_IPV6_DSCP_MASK 0xf03f
 #define SFE_IPV6_DSCP_SHIFT 2
@@ -129,7 +132,8 @@ struct sfe_ipv6_vlan_filter_connection_match {
 					/* Bridge Vlan passthrough enable */
 #define SFE_IPV6_CONNECTION_MATCH_FLAG_VXLAN_GPE (1<<27)
 					/* VXLAN-GPE flow */
-
+#define SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID (1<<28)
+					/* TUN VP valid */
 /*
  * IPv6 multicast destination structure
  */
@@ -300,6 +304,17 @@ struct sfe_ipv6_connection_match {
 	bool sawf_valid;		/* Indicates mark has valid SAWF information. */
 	bool ingress_trustsec_valid;	/* Indicates trustsec header is valid */
 	struct dst_cache dst_cache;     /* Destination route cache */
+
+#if defined(SFE_RFS_SUPPORTED)
+	bool rfs_enabled;		/* Stores information of RFS eligibility for the connection entry. */
+	u32 flow_mtu;			/* Store flow mtu to pass directly to RFS create rule. */
+	u32 return_mtu;			/* Store return mtu to pass directly to RFS create rule. */
+	s32 flow_interface_num;		/* Store namely interface number to pass directly to RFS create rule. */
+	s32 flow_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
+	s32 return_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
+	s32 return_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
+
+#endif
 };
 
 /*
@@ -469,7 +484,8 @@ struct sfe_ipv6_stats {
 	u64 fragment_dropped64;		/*Number of fragments dropped. */
 	u64 fragment_id_timeout64;	/*Number of fragment id timeouts. */
 	u64 fragment_exception64;	/*Number of fragment exception to host. */
-	u64 bridge_vlan_passthorugh_forwarded64;	/* Number of IPV6 bridge vlan passthrough packets forwarded */
+	u64 bridge_vlan_passthrough_forwarded64;	/* Number of IPV6 bridge vlan passthrough packets forwarded */
+	u64 ppe_tun_vp_tx64;				/* Number of IPV6 packets queued to PPE tunnel VP  */
 };
 
 /*
@@ -603,7 +619,8 @@ bool sfe_ipv6_service_class_stats_get(uint8_t sid, uint64_t *bytes, uint64_t *pa
 void sfe_ipv6_exception_stats_inc(struct sfe_ipv6 *si, enum sfe_ipv6_exception_events reason);
 void sfe_ipv6_service_class_stats_inc(struct sfe_ipv6 *si, uint8_t sid, uint64_t bytes);
 #if defined(SFE_RFS_SUPPORTED)
-void sfe_ipv6_fill_connection_dev(struct sfe_ipv6_rule_destroy_msg *msg, struct net_device **original_dev, struct net_device **reply_dev);
+void sfe_ipv6_connection_rule_rfs_valid_set(struct sfe_ipv6_connection_match *match);
+struct sfe_ipv6_connection *sfe_ipv6_connection_rule_get_by_tuple(struct sfe_ipv6_5tuple *tuple);
 #endif
 struct sfe_ipv6_connection_match *
 sfe_ipv6_find_connection_match_rcu(struct sfe_ipv6 *si, struct net_device *dev, u8 protocol,
