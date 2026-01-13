@@ -2,19 +2,8 @@
  * sfe_ipv6_frag.c
  *	Shortcut forwarding engine - IPv6 Fragment forwarding support.
  *
- * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidaries.
+ * SPDX-License-Identifier: ISC
  */
 
 #include <linux/debug_mem_usage.h>
@@ -57,7 +46,6 @@
 #include "sfe_vlan.h"
 #include "sfe_trustsec.h"
 #include "sfe_ipv6_multicast.h"
-#include "sfe_ipv6_frag.h"
 
 /*
  * sfe_ipv6_frag_process_exception_queue()
@@ -65,7 +53,11 @@
  */
 static void sfe_ipv6_frag_process_exception_queue(struct timer_list *t)
 {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0))
+	struct sfe_ipv6_frag_exception *pcpu = timer_container_of(pcpu, t, timer);
+#else
 	struct sfe_ipv6_frag_exception *pcpu = from_timer(pcpu, t, timer);
+#endif
 	struct sk_buff_head *skbh = &pcpu->exception_queue;
 	struct sk_buff *skb;
 
@@ -152,7 +144,11 @@ static void sfe_ipv6_frag_free_id_all(struct sfe_ipv6_frag *sif)
  */
 static void sfe_ipv6_frag_timer_cb(struct timer_list *t)
 {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0))
+	struct sfe_ipv6_frag *sif = timer_container_of(sif, t, timer);
+#else
 	struct sfe_ipv6_frag *sif = from_timer(sif, t, timer);
+#endif
 	unsigned long curr_time = jiffies;
 	struct sfe_ipv6_frag_id_entity *fie, *fie_tmp;
 	spin_lock(&sif->lock);
@@ -241,7 +237,7 @@ static inline unsigned int sfe_ipv6_get_frag_hash(struct sfe_ipv6_frag *sif, str
  *
  * Takes the reference on the fragment id entity on successful lookup.
  */
-struct sfe_ipv6_frag_id_entity
+static struct sfe_ipv6_frag_id_entity
 *sfe_ipv6_frag_id_entity_lookup(struct sfe_ipv6_frag *sif,
 					struct sfe_ipv6_addr *src_ip,
 					struct sfe_ipv6_addr *dest_ip, __be32 frag_id)
@@ -1294,14 +1290,14 @@ void sfe_ipv6_frag_exit(struct sfe_ipv6_frag *sif)
 	 */
 	for_each_online_cpu(cpu) {
 		struct sfe_ipv6_frag_exception *pcpu = per_cpu_ptr(sif->pcpu, cpu);
-		del_timer(&pcpu->timer);
+		timer_delete(&pcpu->timer);
 		skb_queue_purge(&pcpu->exception_queue);
 	}
 
 	/*
 	 * Delete the timer.
 	 */
-	del_timer(&sif->timer);
+	timer_delete(&sif->timer);
 
 	/*
 	 * Free the fragment entries.

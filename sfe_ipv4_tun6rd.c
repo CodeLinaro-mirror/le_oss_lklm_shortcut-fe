@@ -23,6 +23,7 @@
 #include "sfe_pppoe.h"
 #include "sfe_vlan.h"
 #include "sfe_trustsec.h"
+#include "sfe_ipv4_tun6rd.h"
 
 /*
  * sfe_ipv4_recv_tun6rd()

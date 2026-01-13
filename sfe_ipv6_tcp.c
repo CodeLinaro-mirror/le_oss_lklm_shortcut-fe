@@ -22,7 +22,7 @@
 #include "sfe_pppoe.h"
 #include "sfe_vlan.h"
 #include "sfe_trustsec.h"
-
+#include "sfe_ipv6_tcp.h"
 /*
  * sfe_ipv6_process_tcp_option_sack()
  *	Parse TCP SACK option and update ack according
