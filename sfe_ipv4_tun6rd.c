@@ -252,9 +252,10 @@ int sfe_ipv4_recv_tun6rd(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_de
 			DEBUG_TRACE("%px: GSO is not support\n", skb);
 			return 0;
 		}
-
+#ifdef SFE_SUPPORT_PPPOE
 		sfe_pppoe_add_header(skb, cm->pppoe_session_id, PPP_IP);
 		this_cpu_inc(si->stats_pcpu->pppoe_encap_packets_forwarded64);
+#endif
 	}
 
 	/*
