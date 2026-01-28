@@ -1828,7 +1828,7 @@ static inline bool sfe_ipv4_is_same_dest(struct sfe_ipv4_mc_dest *md1, struct sf
  * sfe_ipv4_update_mc_dest_addr
  *  In mcuc case, the dest mac address could be changed, need use the new one.
  */
-void sfe_ipv4_update_mc_dest_addr(struct sfe_ipv4_connection_match *cm, u8 *mac_addr)
+static void sfe_ipv4_update_mc_dest_addr(struct sfe_ipv4_connection_match *cm, u8 *mac_addr)
 {
 	struct sfe_ipv4_mc_dest *cur;
 	list_for_each_entry_rcu(cur, &(cm->mc_list), list) {
@@ -1845,7 +1845,7 @@ void sfe_ipv4_update_mc_dest_addr(struct sfe_ipv4_connection_match *cm, u8 *mac_
  *	add the new dest to the tail
  * return 0.
  */
-int sfe_ipv4_add_mc_dest_tail(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_dest *mc_dest)
+static int sfe_ipv4_add_mc_dest_tail(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_dest *mc_dest)
 {
 	struct sfe_ipv4_mc_dest *cur;
 
@@ -1868,7 +1868,7 @@ int sfe_ipv4_add_mc_dest_tail(struct sfe_ipv4_connection_match *cm, struct sfe_i
  *	add the new dest to the head.
  * return 0.
  */
-int sfe_ipv4_add_mc_dest_head(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_dest *mc_dest)
+static int sfe_ipv4_add_mc_dest_head(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_dest *mc_dest)
 {
 	struct sfe_ipv4_mc_dest *cur;
 	list_for_each_entry_rcu(cur, &(cm->mc_list), list) {
@@ -1889,7 +1889,7 @@ int sfe_ipv4_add_mc_dest_head(struct sfe_ipv4_connection_match *cm, struct sfe_i
  *	Delete the mc dest entry in the list.
  * return 0 successful, return 1 failed.
  */
-int sfe_ipv4_find_and_delete_mc_dest(struct sfe_ipv4_connection_match *cm,
+static int sfe_ipv4_find_and_delete_mc_dest(struct sfe_ipv4_connection_match *cm,
 		struct sfe_ipv4_mc_device_entry *if_rule, struct net_device *dest_dev)
 {
 	struct sfe_ipv4_mc_dest *cur, *tmp;
@@ -1920,7 +1920,7 @@ int sfe_ipv4_find_and_delete_mc_dest(struct sfe_ipv4_connection_match *cm,
  * sfe_ipv4_allocate_mc_dest()
  *	Allocate a new dest and fill the rule information.
  */
-struct sfe_ipv4_mc_dest *sfe_ipv4_allocate_mc_dest(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_rule_create_msg *msg,
+static struct sfe_ipv4_mc_dest *sfe_ipv4_allocate_mc_dest(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_rule_create_msg *msg,
 		struct sfe_ipv4_mc_device_entry *if_rule, struct net_device *dest_dev)
 {
 	struct sfe_ipv4_mc_dest *dest;
@@ -2040,7 +2040,7 @@ struct sfe_ipv4_mc_dest *sfe_ipv4_allocate_mc_dest(struct sfe_ipv4_connection_ma
  * sfe_ipv4_update_mc_dest()
  *	update the mc dest rules.
  */
-int sfe_ipv4_update_mc_dest(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_rule_create_msg *msg)
+static int sfe_ipv4_update_mc_dest(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_rule_create_msg *msg)
 {
 	int idx;
 	u16 if_cnt = msg->if_cnt;
@@ -2101,7 +2101,7 @@ int sfe_ipv4_update_mc_dest(struct sfe_ipv4_connection_match *cm, struct sfe_ipv
  * sfe_ipv4_create_mc_dest()
  *	create the mc dest rules.
  */
-int sfe_ipv4_create_mc_dest(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_rule_create_msg *msg)
+static int sfe_ipv4_create_mc_dest(struct sfe_ipv4_connection_match *cm, struct sfe_ipv4_mc_rule_create_msg *msg)
 {
 	int idx;
 	u16 if_cnt = msg->if_cnt;
