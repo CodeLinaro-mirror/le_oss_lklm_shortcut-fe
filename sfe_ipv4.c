@@ -3225,7 +3225,7 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	 * which will be released in sfe_ipv4_free_connection_rcu()
 	 */
 	sk = __udp4_lib_lookup(net, reply_cm->xlate_src_ip, reply_cm->xlate_src_port,
-			reply_cm->match_dest_ip, reply_cm->match_dest_port, src_if_idx, 0, &udp_table, NULL);
+			reply_cm->match_dest_ip, reply_cm->match_dest_port, src_if_idx, 0, net->ipv4.udp_table, NULL);
 
 	rcu_read_unlock();
 

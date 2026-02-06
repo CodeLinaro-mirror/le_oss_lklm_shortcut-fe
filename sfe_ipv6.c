@@ -2949,7 +2949,7 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	 */
 	sk = __udp6_lib_lookup(net, (const struct in6_addr *)reply_cm->match_dest_ip,
 			reply_cm->match_dest_port, (const struct in6_addr *)reply_cm->xlate_src_ip,
-			reply_cm->xlate_src_port, src_if_idx, 0, &udp_table, NULL);
+			reply_cm->xlate_src_port, src_if_idx, 0, net->ipv4.udp_table, NULL);
 	rcu_read_unlock();
 
 	/*
