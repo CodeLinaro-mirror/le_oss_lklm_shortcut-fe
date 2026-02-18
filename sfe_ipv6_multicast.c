@@ -26,13 +26,13 @@
 #include "sfe_ipv6.h"
 #include "sfe_pppoe.h"
 #include "sfe_vlan.h"
-
+#include "sfe_ipv6_multicast.h"
 
 /*
  * sfe_ipv6_forward_multicast()
  *	Send the packet to an interface.
  */
-int sfe_ipv6_forward_multicast(struct sfe_ipv6 *si, struct sk_buff *skb, unsigned int len, struct ipv6hdr *iph,
+static int sfe_ipv6_forward_multicast(struct sfe_ipv6 *si, struct sk_buff *skb, unsigned int len, struct ipv6hdr *iph,
 		struct udphdr *udph, struct sfe_ipv6_mc_dest *mc_xmit_dev, struct sfe_l2_info *l2_info, bool tun_outer, bool udph_valid)
 
 {

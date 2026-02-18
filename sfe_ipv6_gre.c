@@ -2,19 +2,8 @@
  * sfe_ipv6_gre.c
  *	Shortcut forwarding engine file for IPv6 GRE
  *
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidaries.
+ * SPDX-License-Identifier: ISC
  */
 
 #include <linux/debug_mem_usage.h>
@@ -33,7 +22,7 @@
 #include "sfe_pppoe.h"
 #include "sfe_vlan.h"
 #include "sfe_trustsec.h"
-
+#include "sfe_ipv6_gre.h"
 /*
  * sfe_ipv6_recv_gre()
  *	Handle GRE packet receives and forwarding.

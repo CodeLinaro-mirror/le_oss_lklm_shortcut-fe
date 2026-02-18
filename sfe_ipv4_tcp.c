@@ -21,6 +21,7 @@
 #include "sfe_pppoe.h"
 #include "sfe_vlan.h"
 #include "sfe_trustsec.h"
+#include "sfe_ipv4_tcp.h"
 
 static uint8_t tso_clear_fixed_id __read_mostly;		/* TSO clear fixed id */
 
@@ -897,7 +898,11 @@ int sfe_ipv4_recv_tcp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 		struct rtable *rt;
 		dst = dst_cache_get(&cm->dst_cache);
 		if (unlikely(!dst)) {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
+			rt = ip_route_output(&init_net, ip_hdr(skb)->daddr, 0, 0, 0,RT_SCOPE_UNIVERSE);
+#else
 			rt = ip_route_output(&init_net, ip_hdr(skb)->daddr, 0, 0, 0);
+#endif
 			if (IS_ERR(rt)) {
 				DEBUG_TRACE("%px: VXLAN-GPE failed to get IPv4 route: %pI4 \n", skb, &ip_hdr(skb)->daddr);
 				rcu_read_unlock();
