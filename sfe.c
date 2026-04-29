@@ -1422,7 +1422,7 @@ static sfe_tx_status_t sfe_sync_ipv4_stats_many_msg(struct sfe_ctx_instance_inte
  *
  * @return sfe_tx_status_t The status of the Tx operation
  */
-enum sfe_cmn_response sfe_update_ipv4_rule_msg(struct sfe_ctx_instance_internal *sfe_ctx, struct sfe_ipv4_msg *msg)
+static enum sfe_cmn_response sfe_update_ipv4_rule_msg(struct sfe_ctx_instance_internal *sfe_ctx, struct sfe_ipv4_msg *msg)
 {
 	if (!sfe_ipv4_rule_update(&msg->msg.rule_update)) {
 		DEBUG_WARN("%px: Could not update rule.\n", msg);
@@ -2218,7 +2218,7 @@ static sfe_tx_status_t sfe_sync_ipv6_stats_many_msg(struct sfe_ctx_instance_inte
  *
  * @return sfe_tx_status_t The status of the Tx operation
  */
-enum sfe_cmn_response sfe_update_ipv6_rule_msg(struct sfe_ctx_instance_internal *sfe_ctx, struct sfe_ipv6_msg *msg)
+static enum sfe_cmn_response sfe_update_ipv6_rule_msg(struct sfe_ctx_instance_internal *sfe_ctx, struct sfe_ipv6_msg *msg)
 {
 	if (!sfe_ipv6_rule_update(&msg->msg.rule_update)) {
 		DEBUG_WARN("%px: Could not update rule.\n", msg);

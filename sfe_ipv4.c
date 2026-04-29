@@ -146,21 +146,6 @@ static inline void sfe_ipv4_free_frag_skb_list(struct sk_buff_head *head)
 }
 
 /*
- * sfe_ipv4_free_frag_skb_list
- * 	Free the complete fragment skb list in the failure cases.
- */
-static inline void sfe_ipv4_free_frag_skb_list(struct sk_buff_head *head)
-{
-	struct sk_buff *skb_iter, *tmp;
-
-	DEBUG_TRACE("%p Freeing the complete fragment skb list", head);
-	skb_queue_walk_safe(head, skb_iter, tmp) {
-		mem_debug_update_skb(skb_iter);
-	}
-	dev_kfree_skb_list_fast(head);
-}
-
-/*
  * sfe_ipv4_gen_ip_csum()
  *	Generate the IP checksum for an IPv4 header.
  *
@@ -1741,7 +1726,7 @@ static void sfe_ipv4_match_entry_set_trustsec(
  * sfe_ipv4_unidir_rule_update()
  *      Updates the values of match entries.
  */
-void sfe_ipv4_unidir_rule_update(struct sfe_ipv4_connection *conn, struct sfe_rule_update_msg *update_msg)
+static void sfe_ipv4_unidir_rule_update(struct sfe_ipv4_connection *conn, struct sfe_rule_update_msg *update_msg)
 {
 	struct sfe_ipv4_connection_match *match_dir;
 	u32 qos_tag;

@@ -1472,7 +1472,7 @@ static void sfe_ipv6_match_entry_set_trustsec(
  * sfe_ipv6_unidir_rule_update()
  *	Updates the values of match entries.
  */
-void sfe_ipv6_unidir_rule_update(struct sfe_ipv6_connection *conn, struct sfe_rule_update_msg *update_msg)
+static void sfe_ipv6_unidir_rule_update(struct sfe_ipv6_connection *conn, struct sfe_rule_update_msg *update_msg)
 
 {
 	struct sfe_ipv6_connection_match *match_dir;
