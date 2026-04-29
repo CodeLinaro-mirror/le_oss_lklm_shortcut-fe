@@ -128,12 +128,14 @@ static char *sfe_ipv6_exception_events_string[SFE_IPV6_EXCEPTION_EVENT_LAST] = {
 	"UDP_CHECKSUM_ERROR",
 	"TCP_CHECKSUM_ERROR",
 	"VXLAN_GPE_NO_ROUTE",
-	"VXLAN_GPE_DST_ERROR"
+	"VXLAN_GPE_DST_ERROR",
+	"FLOW_DIR_NOT_ACCEL"
 };
 
 static struct sfe_ipv6 __si6;
 struct sfe_ipv6_msg *sfe_ipv6_sync_many_msg;
 uint32_t sfe_ipv6_sync_max_number;
+extern int sixth_tuple_enable;
 
 /*
  * sfe_ipv6_get_debug_dev()
@@ -168,7 +170,8 @@ static inline unsigned int sfe_ipv6_get_connection_match_hash(struct net_device 
  *	Get the IPv6 flow match info that corresponds to a particular 5-tuple.
  */
 struct sfe_ipv6_connection_match *
-sfe_ipv6_find_connection_match_rcu(struct sfe_ipv6 *si, struct net_device *dev, u8 protocol,
+sfe_ipv6_find_connection_match_rcu(struct sfe_ipv6 *si, struct net_device *dev,
+					struct sfe_l2_info *l2_info, u8 protocol,
 					struct sfe_ipv6_addr *src_ip, __be16 src_port,
 					struct sfe_ipv6_addr *dest_ip, __be16 dest_port)
 {
@@ -193,10 +196,25 @@ sfe_ipv6_find_connection_match_rcu(struct sfe_ipv6 *si, struct net_device *dev, 
 			continue;
 		}
 
+#ifdef SFE_SIXTH_TUPLE_ENABLE
+		if (unlikely(sixth_tuple_enable)) {
+			if (cm->match_dev != dev) {
+				continue;
+			}
+
+			/*
+			 * If no l2_info means ignoring the vlan hdr comparison
+			 * otherwise, it needs vlan hdr is equal.
+			 */
+			if (l2_info && ((cm->ingress_vlan_hdr_cnt != l2_info->vlan_hdr_cnt)
+						|| memcmp(cm->ingress_vlan_hdr, l2_info->vlan_hdr,
+							l2_info->vlan_hdr_cnt * sizeof(struct sfe_vlan_hdr)))) {
+				continue;
+			}
+		}
+#endif
 		this_cpu_inc(si->stats_pcpu->connection_match_hash_hits64);
-
 		break;
-
 	}
 
 	return cm;
@@ -214,36 +232,33 @@ bool sfe_ipv6_get_single_conn_stats(struct sfe_ipv6_single_conn_stats *stats)
 
 	rcu_read_lock();
 
-	original_cm = sfe_ipv6_find_connection_match_rcu(si, stats->org_dev, stats->tuple.protocol, (struct sfe_ipv6_addr *)stats->tuple.flow_ip, stats->tuple.flow_ident, (struct sfe_ipv6_addr *)stats->tuple.return_ip, stats->tuple.return_ident);
+	original_cm = sfe_ipv6_find_connection_match_rcu(si, stats->org_dev, NULL, stats->tuple.protocol,
+			(struct sfe_ipv6_addr *)stats->tuple.flow_ip, stats->tuple.flow_ident,
+			(struct sfe_ipv6_addr *)stats->tuple.return_ip, stats->tuple.return_ident);
 	if (!original_cm) {
 		if (IPPROTO_TCP == stats->tuple.protocol) {
 			sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_TCP_NO_CONNECTION_FAST_FLAGS);
 		} else {
 			sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_UDP_NO_CONNECTION);
 		}
-		DEBUG_TRACE("Failed to find connection match entry for the following connection: protocol: %u, src_ip: %pI6, src_port: %u, dest_ip: %pI6, dest_port: %u\n", stats->tuple.protocol, &stats->tuple.flow_ip, stats->tuple.flow_ident, &stats->tuple.return_ip, stats->tuple.return_ident);
 		rcu_read_unlock();
+		DEBUG_TRACE("Failed to find connection match entry for the following connection:\n"
+			    "\tprotocol: %u, src_ip: %pI6, src_port: %u, dest_ip: %pI6, dest_port: %u\n",
+			    stats->tuple.protocol, &stats->tuple.flow_ip, stats->tuple.flow_ident,
+			    &stats->tuple.return_ip, stats->tuple.return_ident);
 		return false;
 	}
 
+	stats->rx_packet_count += original_cm->rx_packet_count64;
+	stats->rx_byte_count += original_cm->rx_byte_count64;
+
 	reply_cm = original_cm->counter_match;
- 	if (!reply_cm) {
-		if (IPPROTO_TCP == stats->tuple.protocol) {
-			sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_TCP_NO_CONNECTION_FAST_FLAGS);
-		} else {
-			sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_UDP_NO_CONNECTION);
-		}
-		DEBUG_TRACE("Failed to find reverse match entry for the following connection: protocol: %u, src_ip: %pI6, src_port: %u, dest_ip: %pI6, dest_port: %u\n", stats->tuple.protocol, &stats->tuple.flow_ip, stats->tuple.flow_ident, &stats->tuple.return_ip, stats->tuple.return_ident);
-		rcu_read_unlock();
-		return false;
+	if (reply_cm) {
+		stats->tx_packet_count += reply_cm->rx_packet_count64;
+		stats->tx_byte_count += reply_cm->rx_byte_count64;
 	}
 
 	rcu_read_unlock();
-
-	stats->rx_packet_count = original_cm->rx_packet_count64;
-	stats->rx_byte_count = original_cm->rx_byte_count64;
-	stats->tx_packet_count = reply_cm->rx_packet_count64;
-	stats->tx_byte_count = reply_cm->rx_byte_count64;
 	return true;
 }
 EXPORT_SYMBOL(sfe_ipv6_get_single_conn_stats);
@@ -588,7 +603,7 @@ static inline unsigned int sfe_ipv6_get_connection_hash(u8 protocol, struct sfe_
  *
  * On entry we must be holding the lock that protects the hash table.
  */
-static inline struct sfe_ipv6_connection *sfe_ipv6_find_connection(struct sfe_ipv6 *si, u32 protocol,
+struct sfe_ipv6_connection *sfe_ipv6_find_connection(struct sfe_ipv6 *si, u32 flow_rule_id, u32 protocol,
 								   struct sfe_ipv6_addr *src_ip, __be16 src_port,
 								   struct sfe_ipv6_addr *dest_ip, __be16 dest_port)
 {
@@ -600,13 +615,25 @@ static inline struct sfe_ipv6_connection *sfe_ipv6_find_connection(struct sfe_ip
 	c = si->conn_hash[conn_idx];
 
 	while (c) {
+
+		/*
+		 * Serial number and protocol must be matched.
+		 */
+		if (c->flow_rule_id != flow_rule_id || c->protocol != protocol) {
+			c = c->next;
+			continue;
+		}
+
+		/*
+		 * Return original 5tuple matched
+		 */
 		if ((c->src_port == src_port)
 		    && (c->dest_port == dest_port)
 		    && (sfe_ipv6_addr_equal(c->src_ip, src_ip))
-		    && (sfe_ipv6_addr_equal(c->dest_ip, dest_ip))
-		    && (c->protocol == protocol)) {
+		    && (sfe_ipv6_addr_equal(c->dest_ip, dest_ip))) {
 			return c;
 		}
+
 		c = c->next;
 	}
 
@@ -812,6 +839,7 @@ static void sfe_ipv6_gen_sync_connection(struct sfe_ipv6 *si, struct sfe_ipv6_co
 	}
 
 	sis->reason = reason;
+	sis->flow_rule_id = c->flow_rule_id;
 
 	/*
 	 * Get the time increment since our last sync.
@@ -989,6 +1017,7 @@ static void sfe_destroy_ipv6_ppe_rfs_rule(struct sfe_ipv6_connection_match *matc
 	pr6rd.tuple.flow_ip[2] = ntohl(match_dir->match_src_ip[0].addr[1]);
 	pr6rd.tuple.flow_ip[3] = ntohl(match_dir->match_src_ip[0].addr[0]);
 	pr6rd.tuple.flow_ident = ntohs(match_dir->match_src_port);
+	pr6rd.tuple.flow_rule_id = match_dir->connection ? match_dir->connection->flow_rule_id : 0;
 	pr6rd.tuple.return_ip[0] = ntohl(match_dir->match_dest_ip[0].addr[3]);
 	pr6rd.tuple.return_ip[1] = ntohl(match_dir->match_dest_ip[0].addr[2]);
 	pr6rd.tuple.return_ip[2] = ntohl(match_dir->match_dest_ip[0].addr[1]);
@@ -1029,10 +1058,10 @@ void sfe_ipv6_flush_connection(struct sfe_ipv6 *si,
 		/*
 		 * Delete RFS rule in either direction if rfs is present in that direction.
 		 */
-		if (flow_match && flow_match->rfs_enabled) {
+		if (flow_match && (flow_match->rfs_valid_flags & SFE_CONN_MATCH_RFS_VALID_FLAG_RFS_ENABLED)) {
 			sfe_destroy_ipv6_ppe_rfs_rule(flow_match);
 		}
-		if (return_match && return_match->rfs_enabled) {
+		if (return_match && (return_match->rfs_valid_flags & SFE_CONN_MATCH_RFS_VALID_FLAG_RFS_ENABLED)) {
 			sfe_destroy_ipv6_ppe_rfs_rule(return_match);
 		}
 	}
@@ -1264,7 +1293,7 @@ int sfe_ipv6_recv(struct net_device *dev, struct sk_buff *skb, struct sfe_l2_inf
 	}
 
 	if (IPPROTO_ICMPV6 == next_hdr) {
-		return sfe_ipv6_recv_icmp(si, skb, dev, len, iph, ihl);
+		return sfe_ipv6_recv_icmp(si, skb, dev, len, iph, ihl, l2_info);
 	}
 
 #ifdef SFE_DSLITE_ENABLE
@@ -1440,65 +1469,92 @@ static void sfe_ipv6_match_entry_set_trustsec(
 }
 
 /*
- * sfe_ipv6_update_rule()
- *	update forwarding rule after rule is created.
+ * sfe_ipv6_unidir_rule_update()
+ *	Updates the values of match entries.
  */
-void sfe_ipv6_update_rule(struct sfe_ipv6_rule_create_msg *msg)
+void sfe_ipv6_unidir_rule_update(struct sfe_ipv6_connection *conn, struct sfe_rule_update_msg *update_msg)
 
 {
-	struct sfe_ipv6_connection *c;
-	struct sfe_ipv6 *si = &__si6;
+	struct sfe_ipv6_connection_match *match_dir;
+	u32 qos_tag;
+	u8 int_pri, dscp;
+	char direction[] = "reply";
 
-	spin_lock_bh(&si->lock);
-
-	c = sfe_ipv6_find_connection(si,
-				     msg->tuple.protocol,
-				     (struct sfe_ipv6_addr *)msg->tuple.flow_ip,
-				     msg->tuple.flow_ident,
-				     (struct sfe_ipv6_addr *)msg->tuple.return_ip,
-				     msg->tuple.return_ident);
-	if (c != NULL) {
-		sfe_ipv6_update_protocol_state(c, msg);
+	if (update_msg->info.unidir.update_dir == SFE_FLOW_RULE_DIRECTION_FLOW) {
+		match_dir = conn->original_match;
+		qos_tag = update_msg->info.unidir.qos.flow_qos_tag;
+		int_pri = update_msg->info.unidir.qos.flow_int_pri;
+		dscp = update_msg->info.unidir.dscp.flow_dscp;
+	} else {
+		match_dir = conn->reply_match;
+		qos_tag = update_msg->info.unidir.qos.return_qos_tag;
+		int_pri = update_msg->info.unidir.qos.flow_int_pri;
+		dscp = update_msg->info.unidir.dscp.return_dscp;
 	}
 
-	spin_unlock_bh(&si->lock);
+	match_dir->flow_accel = true;
+
+	if (update_msg->flags & SFE_UPDATE_RULE_QOS_VALID) {
+		match_dir->priority = qos_tag;
+		match_dir->dscp = dscp << SFE_IPV6_DSCP_SHIFT;
+#if defined(SFE_PPE_QOS_SUPPORTED)
+		match_dir->int_pri = int_pri;
+#endif
+	}
+
+	if (update_msg->info.unidir.update_dir == SFE_FLOW_RULE_DIRECTION_FLOW) {
+		snprintf(direction, sizeof(direction), "%s", "orig");
+	}
+
+	DEBUG_TRACE("%px: matched direction(%s) updated qos_tag:%x int_pri:%x\n", conn, direction, qos_tag, int_pri);
 }
 
 /*
- * sfe_ipv6_mark_rule_update()
+ * sfe_ipv6_rule_update()
  *	Updates the mark values of match entries.
  */
-bool sfe_ipv6_mark_rule_update(struct sfe_connection_mark *mark)
+bool sfe_ipv6_rule_update(struct sfe_rule_update_msg *update_msg)
 {
 	struct sfe_ipv6_connection *c;
 	struct sfe_ipv6 *si = &__si6;
 
 	spin_lock_bh(&si->lock);
-	c = sfe_ipv6_find_connection(si, mark->protocol,
-				     (struct sfe_ipv6_addr *)mark->src_ip,
-				     mark->src_port,
-				     (struct sfe_ipv6_addr *)mark->dest_ip,
-				     mark->dest_port);
+	c = sfe_ipv6_find_connection(si, update_msg->flow_rule_id, update_msg->protocol,
+				     (struct sfe_ipv6_addr *)update_msg->src_ip,
+				     update_msg->src_port,
+				     (struct sfe_ipv6_addr *)update_msg->dest_ip,
+				     update_msg->dest_port);
 	if (!c) {
 		spin_unlock_bh(&si->lock);
-		DEBUG_WARN("%px: connection not found for mark update\n", mark);
+		DEBUG_WARN("%px: connection not found for given update_msg\n", update_msg);
 		return false;
 	}
 
-	switch (mark->type) {
-	case SFE_CONNECTION_MARK_TYPE_CONNMARK:
-		c->original_match ->mark = mark->flow_mark;
-		if (c->reply_match) {
-			c->reply_match->mark = mark->return_mark;
-		}
-		spin_unlock_bh(&si->lock);
+	switch (update_msg->type) {
+	case SFE_CONNECTION_MARK_TYPE_UNIDIR_MARK:
+		sfe_ipv6_unidir_rule_update(c, update_msg);
 		break;
 
-	case SFE_CONNECTION_MARK_TYPE_SAWFMARK:
-		if (mark->flags & SFE_SAWF_MARK_FLOW_VALID) {
-			c->original_match->mark = mark->flow_mark;
-			c->original_match->svc_id = mark->flow_svc_id;
-			if (mark->flags & SFE_SAWF_MARK_DEPRIO) {
+	case SFE_CONNECTION_MARK_TYPE_CONNMARK:
+		c->original_match->mark = update_msg->info.connmark.flow_mark;
+		if (c->reply_match) {
+			c->reply_match->mark = update_msg->info.connmark.return_mark;
+		}
+		DEBUG_TRACE("%px: flow/return mark updated with %x/%x\n",
+				c, update_msg->info.connmark.flow_mark, update_msg->info.connmark.return_mark);
+		break;
+
+	case SFE_CONNECTION_MARK_TYPE_BIDIR_SAWF_MARK:
+		if (update_msg->flags & SFE_UPDATE_RULE_SAWF_FLOW_VALID) {
+			/*
+			 * Todo: Make the read write of flow_mark atomic
+			 * No lock is added here because the mark update does not occur until
+			 * the update function is invoked. Therefore, flow_mark is only read
+			 * after the update is completed.
+			 */
+			c->original_match->mark = update_msg->info.sawf.flow_mark;
+			c->original_match->svc_id = update_msg->info.sawf.flow_svc_id;
+			if (update_msg->flags & SFE_UPDATE_RULE_SAWF_DEPRIO) {
 				c->original_match->flags &= ~SFE_IPV6_CONNECTION_MATCH_FLAG_MARK;
 				c->original_match->sawf_valid = false;
 			} else {
@@ -1508,10 +1564,10 @@ bool sfe_ipv6_mark_rule_update(struct sfe_connection_mark *mark)
 		}
 
 		if (c->reply_match) {
-			if (mark->flags & SFE_SAWF_MARK_RETURN_VALID) {
-				c->reply_match->mark = mark->return_mark;
-				c->reply_match->svc_id = mark->return_svc_id;
-				if (mark->flags & SFE_SAWF_MARK_DEPRIO) {
+			if (update_msg->flags & SFE_UPDATE_RULE_SAWF_RETURN_VALID) {
+				c->reply_match->mark = update_msg->info.sawf.return_mark;
+				c->reply_match->svc_id = update_msg->info.sawf.return_svc_id;
+				if (update_msg->flags & SFE_UPDATE_RULE_SAWF_DEPRIO) {
 					c->reply_match->flags &= ~SFE_IPV6_CONNECTION_MATCH_FLAG_MARK;
 					c->reply_match->sawf_valid = false;
 				} else {
@@ -1520,20 +1576,18 @@ bool sfe_ipv6_mark_rule_update(struct sfe_connection_mark *mark)
 				}
 			}
 		}
-		spin_unlock_bh(&si->lock);
+		DEBUG_TRACE("%px: flow/return mark updated with %x/%x\n",
+				c, update_msg->info.sawf.flow_mark, update_msg->info.sawf.return_mark);
 		break;
 
 	default:
-		spin_unlock_bh(&si->lock);
-		DEBUG_WARN("%px: unsupported mark type: %d\n", mark, mark->type);
+		DEBUG_WARN("%px: unsupported update_msg type: %d\n", update_msg, update_msg->type);
 		break;
 	}
 
-	DEBUG_TRACE("%px: flow/return mark updated with %x/%x\n",
-			c, mark->flow_mark, mark->return_mark);
+	spin_unlock_bh(&si->lock);
 	return true;
 }
-EXPORT_SYMBOL(sfe_ipv6_mark_rule_update);
 
 /*
  * sfe_ipv6_xmit_eth_type_check
@@ -1904,7 +1958,7 @@ sfe_response_t sfe_ipv6_create_mc_rule(struct sfe_ipv6_mc_rule_create_msg *msg)
 	struct sfe_ipv6_connection_match *original_cm;
 	struct net_device *dest_dev;
 	struct net_device *src_dev;
-	struct sfe_ipv6_5tuple *tuple = &msg->tuple;
+	struct sfe_ipv6_tuple *tuple = &msg->tuple;
 	s32 flow_interface_num = msg->conn_rule.flow_top_interface_num;
 	unsigned int src_if_idx;
 	uint32_t if_min_mtu;
@@ -1998,7 +2052,7 @@ sfe_response_t sfe_ipv6_create_mc_rule(struct sfe_ipv6_mc_rule_create_msg *msg)
 	 * Check to see if there is already a flow that matches the rule we're
 	 * trying to create.  If there is then we can't create a new one.
 	 */
-	c_old = sfe_ipv6_find_connection(si,
+	c_old = sfe_ipv6_find_connection(si, tuple->flow_rule_id,
 					tuple->protocol,
 					(struct sfe_ipv6_addr *)tuple->flow_ip,
 					tuple->flow_ident,
@@ -2058,7 +2112,6 @@ update_done:
 	original_cm->counter_match = NULL;
 
 #if defined(SFE_RFS_SUPPORTED)
-	original_cm->rfs_enabled = false;
 	original_cm->flow_mtu = msg->conn_rule.flow_mtu;
 	original_cm->flow_interface_num = msg->conn_rule.flow_interface_num;
 	original_cm->flow_top_interface_num = msg->conn_rule.flow_top_interface_num;
@@ -2128,14 +2181,12 @@ update_done:
 #ifdef CONFIG_NF_FLOW_COOKIE
 	original_cm->flow_cookie = 0;
 #endif
-#ifdef CONFIG_XFRM
+
 	if (msg->valid_flags & SFE_RULE_CREATE_DIRECTION_VALID) {
 		original_cm->flow_accel = msg->direction_rule.flow_accel;
 	} else {
-		original_cm->flow_accel = 1;
+		original_cm->flow_accel = true;
 	}
-#endif
-
 
 	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_FLOW_SRC_INTERFACE_CHECK) {
 		original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_SRC_INTERFACE_CHECK;
@@ -2184,6 +2235,7 @@ update_done:
 	 * Fill in the ipv6_connection object.
 	 */
 	c->protocol = tuple->protocol;
+	c->flow_rule_id = tuple->flow_rule_id;
 	c->src_ip[0] = *(struct sfe_ipv6_addr *)tuple->flow_ip;
 	c->src_ip_xlate[0] = *(struct sfe_ipv6_addr *)msg->conn_rule.flow_ip_xlate;
 	c->src_port = tuple->flow_ident;
@@ -2205,10 +2257,10 @@ update_done:
 	/*
 	 * We have everything we need!
 	 */
-	DEBUG_INFO("%px: new multicast connection - p: %d\n"
+	DEBUG_INFO("%px: new multicast connection - SN: %u p: %d\n"
 		   "  s: %s:%pxM(%pxM):%pI6(%pI6):%u(%u)\n"
 		   "  d: %s:%pxM(%pxM):%pI6(%pI6):%u(%u)\n",
-		   c, tuple->protocol,
+		   c, tuple->flow_rule_id, tuple->protocol,
 		   src_dev->name, msg->conn_rule.flow_mac, NULL,
 		   (void *)tuple->flow_ip, (void *)&msg->conn_rule.flow_ip_xlate, ntohs(tuple->flow_ident), ntohs(msg->conn_rule.flow_ident_xlate),
 		   dest_dev->name, NULL, msg->dest_mac,
@@ -2239,7 +2291,7 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	struct net_device *src_dev;
 	struct net_device *local_dest_dev;
 	struct net_device *local_src_dev;
-	struct sfe_ipv6_5tuple *tuple = &msg->tuple;
+	struct sfe_ipv6_tuple *tuple = &msg->tuple;
 	struct sock *sk;
 	struct net *net;
 	unsigned int src_if_idx;
@@ -2366,7 +2418,7 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	 * Check to see if there is already a flow that matches the rule we're
 	 * trying to create.  If there is then we can't create a new one.
 	 */
-	old_c = sfe_ipv6_find_connection(si,
+	old_c = sfe_ipv6_find_connection(si, tuple->flow_rule_id,
 					tuple->protocol,
 					(struct sfe_ipv6_addr *)tuple->flow_ip,
 					tuple->flow_ident,
@@ -2417,7 +2469,6 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	reply_cm->top_interface_dev = NULL;
 
 #if defined(SFE_RFS_SUPPORTED)
-	original_cm->rfs_enabled = false;
 	original_cm->flow_mtu = msg->conn_rule.flow_mtu;
 	original_cm->return_mtu = msg->conn_rule.return_mtu;
 	original_cm->flow_interface_num = msg->conn_rule.flow_interface_num;
@@ -2606,13 +2657,12 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 #ifdef CONFIG_NF_FLOW_COOKIE
 	original_cm->flow_cookie = 0;
 #endif
-#ifdef CONFIG_XFRM
+
 	if (msg->valid_flags & SFE_RULE_CREATE_DIRECTION_VALID) {
 		original_cm->flow_accel = msg->direction_rule.flow_accel;
 	} else {
-		original_cm->flow_accel = 1;
+		original_cm->flow_accel = true;
 	}
-#endif
 
 	/*
 	 * Check if TSO is enabled on the bottom interface. This flag is used for PPPoE TCP flows.
@@ -2790,7 +2840,6 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	reply_cm->xmit_dev = src_dev;
 
 #if defined(SFE_RFS_SUPPORTED)
-	reply_cm->rfs_enabled = false;
 	reply_cm->flow_mtu = msg->conn_rule.return_mtu;
 	reply_cm->return_mtu = msg->conn_rule.flow_mtu;
 	reply_cm->flow_interface_num = msg->conn_rule.return_interface_num;
@@ -3003,8 +3052,14 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 		}
 	}
 
+	/*
+	 * When there are more than 1 qdisc configured in FROM/TO interface heirarchy, SFE uses the
+	 * corresponding top interface to send the packet. Check if SFE should add L2 header which is
+	 * required when the top interface is VLAN as Linux adds only the VLAN tag and expects the L2
+	 * header to be present or the top interface is not found.
+	 */
 	if (disable_l2_flow) {
-		if (!reply_cm->top_interface_dev || is_vlan_dev(reply_cm->top_interface_dev)) {
+		if (!original_cm->top_interface_dev || is_vlan_dev(original_cm->top_interface_dev)) {
 			reply_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_WRITE_L2_HDR;
 
 			/*
@@ -3020,7 +3075,7 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	}
 
 	if (disable_l2_return) {
-		if (!original_cm->top_interface_dev || is_vlan_dev(original_cm->top_interface_dev)) {
+		if (!reply_cm->top_interface_dev || is_vlan_dev(reply_cm->top_interface_dev)) {
 			original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_WRITE_L2_HDR;
 
 			/*
@@ -3092,13 +3147,12 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 #ifdef CONFIG_NF_FLOW_COOKIE
 	reply_cm->flow_cookie = 0;
 #endif
-#ifdef CONFIG_XFRM
+
 	if (msg->valid_flags & SFE_RULE_CREATE_DIRECTION_VALID) {
 		reply_cm->flow_accel = msg->direction_rule.return_accel;
 	} else {
-		reply_cm->flow_accel = 1;
+		reply_cm->flow_accel = true;
 	}
-#endif
 
 	/*
 	 * the inet6_protocol handler will be used only in decap path
@@ -3342,6 +3396,24 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 		reply_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_XLATE_DEST;
 	}
 
+#if defined(SFE_RFS_SUPPORTED)
+	/*
+	 * Set outer_flow to true if flag OUTER_FLOW is valid.
+	 */
+	if (msg->valid_flags & SFE_RULE_CREATE_TUNNEL_OUTER_FLOW_VALID) {
+		original_cm->rfs_valid_flags |= SFE_CONN_MATCH_RFS_VALID_FLAG_TUNNEL_OUTER_FLOW;
+		reply_cm->rfs_valid_flags |= SFE_CONN_MATCH_RFS_VALID_FLAG_TUNNEL_OUTER_FLOW;
+	}
+
+	/*
+	 * Set tun_flow to true if flag TUNNEL_FLOW is valid.
+	 */
+	if (msg->valid_flags & SFE_RULE_CREATE_TUNNEL_FLOW_VALID) {
+		original_cm->rfs_valid_flags |= SFE_CONN_MATCH_RFS_VALID_FLAG_TUNNEL_FLOW;
+		reply_cm->rfs_valid_flags |= SFE_CONN_MATCH_RFS_VALID_FLAG_TUNNEL_FLOW;
+	}
+#endif
+
 	/*
 	 * Initialize the protocol-specific information that we track.
 	 */
@@ -3393,6 +3465,7 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	c->debug_read_seq = 0;
 	c->last_sync_jiffies = get_jiffies_64();
 	c->removed = false;
+	c->flow_rule_id = tuple->flow_rule_id;
 
 	sfe_ipv6_connection_match_compute_translations(original_cm);
 	sfe_ipv6_connection_match_compute_translations(reply_cm);
@@ -3434,9 +3507,25 @@ sk_refcount_dec:
 	}
 
 free_reply_cm:
+	if (reply_cm->qdisc_xmit_dev) {
+		dev_put(reply_cm->xmit_dev);
+	}
+
+	if (reply_cm->top_interface_dev) {
+		dev_put(reply_cm->top_interface_dev);
+	}
+
 	kfree(reply_cm);
 
 free_original_cm:
+	if (original_cm->qdisc_xmit_dev) {
+		dev_put(original_cm->xmit_dev);
+	}
+
+	if (original_cm->top_interface_dev) {
+		dev_put(original_cm->top_interface_dev);
+	}
+
 	kfree(original_cm);
 
 free_conn_obj:
@@ -3464,7 +3553,7 @@ void sfe_ipv6_connection_rule_rfs_valid_set(struct sfe_ipv6_connection_match *ma
 		return;
 	}
 	spin_lock_bh(&si->lock);
-	match->rfs_enabled = true;
+	match->rfs_valid_flags |=  SFE_CONN_MATCH_RFS_VALID_FLAG_RFS_ENABLED;
 	spin_unlock_bh(&si->lock);
 
 	return;
@@ -3474,12 +3563,12 @@ void sfe_ipv6_connection_rule_rfs_valid_set(struct sfe_ipv6_connection_match *ma
  * sfe_ipv6_connection_rule_get()
  *	Get value of rfs parameter from connection entry.
  */
-struct sfe_ipv6_connection *sfe_ipv6_connection_rule_get_by_tuple(struct sfe_ipv6_5tuple *tuple) {
+struct sfe_ipv6_connection *sfe_ipv6_connection_rule_get_by_tuple(struct sfe_ipv6_tuple *tuple) {
 	struct sfe_ipv6 *si = &__si6;
 	struct sfe_ipv6_connection *c;
 
 	spin_lock_bh(&si->lock);
-	c = sfe_ipv6_find_connection(si, tuple->protocol,
+	c = sfe_ipv6_find_connection(si, tuple->flow_rule_id, tuple->protocol,
 			(struct sfe_ipv6_addr *)tuple->flow_ip, tuple->flow_ident,
 			(struct sfe_ipv6_addr *)tuple->return_ip, tuple->return_ident);
 	if (!c) {
@@ -3502,7 +3591,7 @@ void sfe_ipv6_destroy_rule(struct sfe_ipv6_rule_destroy_msg *msg)
 	struct sfe_ipv6 *si = &__si6;
 	struct sfe_ipv6_connection *c;
 	bool ret;
-	struct sfe_ipv6_5tuple *tuple = &msg->tuple;
+	struct sfe_ipv6_tuple *tuple = &msg->tuple;
 
 	this_cpu_inc(si->stats_pcpu->connection_destroy_requests64);
 
@@ -3512,15 +3601,16 @@ void sfe_ipv6_destroy_rule(struct sfe_ipv6_rule_destroy_msg *msg)
 	 * Check to see if we have a flow that matches the rule we're trying
 	 * to destroy.  If there isn't then we can't destroy it.
 	 */
-	c = sfe_ipv6_find_connection(si, tuple->protocol, (struct sfe_ipv6_addr *)tuple->flow_ip, tuple->flow_ident,
-				     (struct sfe_ipv6_addr *)tuple->return_ip, tuple->return_ident);
+	c = sfe_ipv6_find_connection(si, tuple->flow_rule_id, tuple->protocol,
+			(struct sfe_ipv6_addr *)tuple->flow_ip, tuple->flow_ident,
+			(struct sfe_ipv6_addr *)tuple->return_ip, tuple->return_ident);
 	if (!c) {
 		spin_unlock_bh(&si->lock);
 
 		this_cpu_inc(si->stats_pcpu->connection_destroy_misses64);
 
-		DEBUG_TRACE("connection does not exist - p: %d, s: %pI6:%u, d: %pI6:%u\n",
-			    tuple->protocol, tuple->flow_ip, ntohs(tuple->flow_ident),
+		DEBUG_TRACE("connection does not exist - flow_rule_id: %d p: %d, s: %pI6:%u, d: %pI6:%u\n",
+			    tuple->flow_rule_id, tuple->protocol, tuple->flow_ip, ntohs(tuple->flow_ident),
 			    tuple->return_ip, ntohs(tuple->return_ident));
 		return;
 	}
@@ -3535,8 +3625,8 @@ void sfe_ipv6_destroy_rule(struct sfe_ipv6_rule_destroy_msg *msg)
 		sfe_ipv6_flush_connection(si, c, SFE_RULE_SYNC_REASON_DESTROY);
 	}
 
-	DEBUG_INFO("connection destroyed - p: %d, s: %pI6:%u, d: %pI6:%u\n",
-		   tuple->protocol, tuple->flow_ip, ntohs(tuple->flow_ident),
+	DEBUG_INFO("connection destroyed - flow_rule_id:%d  p: %d, s: %pI6:%u, d: %pI6:%u\n",
+		   tuple->flow_rule_id, tuple->protocol, tuple->flow_ip, ntohs(tuple->flow_ident),
 		   tuple->return_ip, ntohs(tuple->return_ident));
 }
 
@@ -3805,6 +3895,7 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 	struct sfe_ipv6_connection_match *reply_cm;
 	int protocol;
 	int status;
+	u32 flow_rule_id;
 	struct net_device *src_dev;
 	struct sfe_ipv6_addr src_ip;
 	struct sfe_ipv6_addr src_ip_xlate;
@@ -3843,6 +3934,7 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 #ifdef CONFIG_NF_FLOW_COOKIE
 	int src_flow_cookie, dst_flow_cookie;
 #endif
+	bool reply_flow_accel = 0;
 
 	spin_lock_bh(&si->lock);
 
@@ -3864,6 +3956,7 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 	original_cm = c->original_match;
 	reply_cm = c->reply_match;
 
+	flow_rule_id = c->flow_rule_id;
 	protocol = c->protocol;
 	src_dev = c->original_dev;
 	src_ip = c->src_ip[0];
@@ -3933,6 +4026,7 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 #ifdef CONFIG_NF_FLOW_COOKIE
 		dst_flow_cookie = reply_cm->flow_cookie;
 #endif
+		reply_flow_accel = reply_cm->flow_accel;
 
 	} else {
 		dest_priority = 0;
@@ -3961,7 +4055,7 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 #endif
 	spin_unlock_bh(&si->lock);
 
-	ws->msg_len += snprintf(ws->msg, length - ws->msg_len, "\t\t<connection "
+	ws->msg_len += snprintf(ws->msg, SFE_IPV6_DEBUG_MSG_SIZE - ws->msg_len, "\t\t<connection "
 				"protocol=\"%u\" "
 				"src_dev=\"%s\" "
 				"src_ip=\"%pI6\" src_ip_xlate=\"%pI6\" "
@@ -3971,6 +4065,7 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 				"src_mark=\"%08x\" "
 				"src_fast_xmit=\"%s\" "
 				"orig_cm_flags=\"%08x\" "
+				"orig_dir_en=\"%s\" "
 				"dest_dev=\"%s\" "
 				"dest_ip=\"%pI6\" dest_ip_xlate=\"%pI6\" "
 				"dest_port=\"%u\" dest_port_xlate=\"%u\" "
@@ -3979,10 +4074,12 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 				"dest_mark=\"%08x\" "
 				"reply_fast_xmit=\"%s\" "
 				"reply_cm_flags=\"%08x\" "
+				"reply_dir_en=\"%s\" "
 #ifdef CONFIG_NF_FLOW_COOKIE
 				"src_flow_cookie=\"%d\" dst_flow_cookie=\"%d\" "
 #endif
-				"last_sync=\"%llu\" ",
+				"last_sync=\"%llu\" "
+				"flow_rule_id=\"%u\" ",
 				protocol,
 				src_dev->name,
 				&src_ip, &src_ip_xlate,
@@ -3992,6 +4089,7 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 				src_mark,
 				original_fast_xmit ? "Yes" : "No",
 				original_cm_flags,
+				original_cm->flow_accel ? "Yes" : "No",
 				dest_dev->name,
 				&dest_ip, &dest_ip_xlate,
 				ntohs(dest_port), ntohs(dest_port_xlate),
@@ -4000,10 +4098,11 @@ static int sfe_ipv6_debug_dev_read_connections_connection(struct sfe_ipv6 *si, s
 				dest_mark,
 				reply_fast_xmit ? "Yes" : "No",
 				reply_cm_flags,
+				reply_flow_accel ? "Yes" : "No",
 #ifdef CONFIG_NF_FLOW_COOKIE
 				src_flow_cookie, dst_flow_cookie,
 #endif
-				last_sync_jiffies);
+				last_sync_jiffies, flow_rule_id);
 
 	if (orig_ingress_vlan_hdr_cnt || orig_egress_vlan_hdr_cnt) {
 		ws->msg_len += snprintf(ws->msg + ws->msg_len, length - ws->msg_len,

@@ -33,7 +33,7 @@
  * within Linux has all of the correct state should it need it.
  */
 int sfe_ipv4_recv_icmp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_device *dev,
-			      unsigned int len, struct iphdr *iph, unsigned int ihl)
+			      unsigned int len, struct iphdr *iph, unsigned int ihl, struct sfe_l2_info *l2_info)
 {
 	struct icmphdr *icmph;
 	struct iphdr *icmp_iph;
@@ -169,9 +169,8 @@ int sfe_ipv4_recv_icmp(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devi
 	 * been sent on the interface from which we received it though so that's still
 	 * ok to use.
 	 */
-	cm = sfe_ipv4_find_connection_match_rcu(si, dev, icmp_iph->protocol, dest_ip, dest_port, src_ip, src_port);
+	cm = sfe_ipv4_find_connection_match_rcu(si, dev, l2_info, icmp_iph->protocol, dest_ip, dest_port, src_ip, src_port);
 	if (unlikely(!cm)) {
-
 		rcu_read_unlock();
 		sfe_ipv4_exception_stats_inc(si, SFE_IPV4_EXCEPTION_EVENT_ICMP_NO_CONNECTION);
 		DEBUG_TRACE("no connection found\n");

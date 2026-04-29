@@ -3,7 +3,7 @@
  *	Shortcut forwarding engine file for IPv6 UDP
  *
  * Copyright (c) 2015-2016, 2019-2020, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidaries.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: ISC
  */
 
@@ -186,17 +186,17 @@ int sfe_ipv6_recv_udp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 #ifdef CONFIG_NF_FLOW_COOKIE
 	cm = si->sfe_flow_cookie_table[skb->flow_cookie & SFE_FLOW_COOKIE_MASK].match;
 	if (unlikely(!cm)) {
-		cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_UDP, src_ip, src_port, dest_ip, dest_port);
+		cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_UDP, src_ip, src_port, dest_ip, dest_port);
 	}
 #else
-	cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_UDP, src_ip, src_port, dest_ip, dest_port);
+	cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_UDP, src_ip, src_port, dest_ip, dest_port);
 #endif
 	if (unlikely(!cm)) {
 
 		/*
 		 * Try a 4-tuple lookup; required for tunnels like VxLAN.
 		 */
-		cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_UDP, src_ip, 0, dest_ip, dest_port);
+		cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_UDP, src_ip, 0, dest_ip, dest_port);
 		if (unlikely(!cm)) {
 			rcu_read_unlock();
 			sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_UDP_NO_CONNECTION);
@@ -310,17 +310,15 @@ int sfe_ipv6_recv_udp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 		return 0;
 	}
 
-#ifdef CONFIG_XFRM
 	/*
 	 * We can't accelerate the flow on this direction, just let it go
 	 * through the slow path.
 	 */
 	if (unlikely(!cm->flow_accel)) {
 		rcu_read_unlock();
-		this_cpu_inc(si->stats_pcpu->packets_not_forwarded64);
+		sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_FLOW_DIR_NOT_ACCEL);
 		return 0;
 	}
-#endif
 
 	bridge_flow = !!(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_BRIDGE_FLOW);
 

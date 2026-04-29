@@ -2,7 +2,7 @@
  * sfe_ipv4_gre.c
  *	Shortcut forwarding engine file for IPv4 GRE
  *
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidaries.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: ISC
  */
 
@@ -77,10 +77,10 @@ int sfe_ipv4_recv_gre(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 #ifdef CONFIG_NF_FLOW_COOKIE
 	cm = si->sfe_flow_cookie_table[skb->flow_cookie & SFE_FLOW_COOKIE_MASK].match;
 	if (unlikely(!cm)) {
-		cm = sfe_ipv4_find_connection_match_rcu(si, dev, IPPROTO_GRE, src_ip, 0, dest_ip, dest_port);
+		cm = sfe_ipv4_find_connection_match_rcu(si, dev, l2_info, IPPROTO_GRE, src_ip, 0, dest_ip, dest_port);
 	}
 #else
-	cm = sfe_ipv4_find_connection_match_rcu(si, dev, IPPROTO_GRE, src_ip, 0, dest_ip, dest_port);
+	cm = sfe_ipv4_find_connection_match_rcu(si, dev, l2_info, IPPROTO_GRE, src_ip, 0, dest_ip, dest_port);
 #endif
 
 	if (unlikely(!cm)) {
@@ -270,6 +270,13 @@ int sfe_ipv4_recv_gre(struct sfe_ipv4 *si, struct sk_buff *skb, struct net_devic
 	 * protocol handler will be valid only in decap-path.
 	 */
 	if (cm->proto) {
+		/*
+		 * Set SKB packet type to PACKET_HOST
+		 */
+		if (unlikely(cm->flags & SFE_IPV4_CONNECTION_MATCH_FLAG_PACKET_HOST)) {
+			skb->pkt_type = PACKET_HOST;
+		}
+
 		struct net_protocol *ipprot = cm->proto;
 		skb_reset_network_header(skb);
 		skb_pull(skb, ihl);

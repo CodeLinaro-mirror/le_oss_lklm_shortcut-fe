@@ -195,10 +195,6 @@ struct sfe_ipv4_connection_match {
 #ifdef CONFIG_NF_FLOW_COOKIE
 	u32 flow_cookie;		/* used flow cookie, for debug */
 #endif
-#ifdef CONFIG_XFRM
-	u32 flow_accel;             /* The flow accelerated or not */
-#endif
-
 	struct sfe_ipv4_connection *connection;
 	struct sfe_ipv4_connection_match *counter_match;
 					/* Matches the flow in the opposite direction as the one in *connection */
@@ -293,7 +289,7 @@ struct sfe_ipv4_connection_match {
 	struct dst_cache dst_cache;     /* Destination route cache */
 
 #if defined(SFE_RFS_SUPPORTED)
-	bool rfs_enabled;		/* Stores information of RFS eligibility for the connection entry. */
+	u32 rfs_valid_flags;	/* Stores information whether different fields are valid for the flow. */
 	u32 flow_mtu;			/* Store flow mtu to pass directly to RFS create rule. */
 	u32 return_mtu;			/* Store return mtu to pass directly to RFS create rule. */
 	s32 flow_interface_num;		/* Store namely interface number to pass directly to RFS create rule. */
@@ -302,6 +298,7 @@ struct sfe_ipv4_connection_match {
 	s32 return_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
 
 #endif
+	bool flow_accel;		/* The flow accelerated or not */
 };
 
 /*
@@ -321,6 +318,7 @@ struct sfe_ipv4_connection {
 	__be16 src_port_xlate;		/* Src port post-translation */
 	__be16 dest_port;		/* Dest port pre-translation */
 	__be16 dest_port_xlate;		/* Dest port post-translation */
+	u32 flow_rule_id;			/* Serial number used to talk with ecm */
 	struct sfe_ipv4_connection_match *original_match;
 					/* Original direction matching structure */
 	struct net_device *original_dev;
@@ -422,6 +420,7 @@ enum sfe_ipv4_exception_events {
 	SFE_IPV4_EXCEPTION_EVENT_TCP_CHECKSUM_ERROR,
 	SFE_IPV4_EXCEPTION_EVENT_UDP_CHECKSUM_ERROR,
 	SFE_IPV4_EXCEPTION_EVENT_VXLAN_GPE_NO_ROUTE,
+	SFE_IPV4_EXCEPTION_EVENT_FLOW_DIR_NOT_ACCEL,
 	SFE_IPV4_EXCEPTION_EVENT_LAST
 };
 
@@ -572,12 +571,18 @@ void sfe_ipv4_flush_connection(struct sfe_ipv4 *si, struct sfe_ipv4_connection *
 void sfe_ipv4_sync_status(struct sfe_ipv4 *si, struct sfe_ipv4_connection *c, sfe_rule_sync_reason_t reason);
 #if defined(SFE_RFS_SUPPORTED)
 void sfe_ipv4_connection_rule_rfs_valid_set(struct sfe_ipv4_connection_match *match);
-struct sfe_ipv4_connection *sfe_ipv4_connection_rule_get_by_tuple(struct sfe_ipv4_5tuple *tuple);
+struct sfe_ipv4_connection *sfe_ipv4_connection_rule_get_by_tuple(struct sfe_ipv4_tuple *tuple);
 #endif
 struct sfe_ipv4_connection_match *
-sfe_ipv4_find_connection_match_rcu(struct sfe_ipv4 *si, struct net_device *dev, u8 protocol,
+sfe_ipv4_find_connection_match_rcu(struct sfe_ipv4 *si, struct net_device *dev,
+					struct sfe_l2_info *l2_info, u8 protocol,
 					__be32 src_ip, __be16 src_port,
 					__be32 dest_ip, __be16 dest_port);
+
+struct sfe_ipv4_connection *sfe_ipv4_find_connection(struct sfe_ipv4 *si, u32 flow_rule_id, u32 protocol,
+					__be32 src_ip, __be16 src_port,
+					__be32 dest_ip, __be16 dest_port);
+
 int sfe_ipv4_frag_prepare(struct sfe_ipv4 *si, struct sfe_ipv4_connection_match *cm, struct sk_buff *skb, struct sk_buff_head *head, struct iphdr *iph);
 void sfe_ipv4_frag(struct sfe_ipv4 *si, struct sfe_ipv4_connection_match *cm, struct sk_buff *skb, struct sk_buff_head *head, struct iphdr *iph, bool fast_xmit);
 
