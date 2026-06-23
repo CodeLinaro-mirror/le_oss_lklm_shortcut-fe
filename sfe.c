@@ -2892,6 +2892,84 @@ static const struct device_attribute sfe_tso_clear_fixed_id_attr =
 	__ATTR(tso_clear_fixed_id,  0644, sfe_get_tso_clear_fixed_id, sfe_set_tso_clear_fixed_id);
 
 /*
+ * sfe_get_ipv4_max_conn_threshold()
+ *	Get current IPv4 max connection threshold.
+ */
+static ssize_t sfe_get_ipv4_max_conn_threshold(struct device *dev,
+                           struct device_attribute *attr,
+                           char *buf)
+{
+    return snprintf(buf, PAGE_SIZE, "%d\n", max_ipv4_conn);
+}
+
+/*
+ * sfe_set_ipv4_max_conn_threshold()
+ *	Set IPv4 max connection threshold.
+ */
+static ssize_t sfe_set_ipv4_max_conn_threshold(struct device *dev,
+                           struct device_attribute *attr,
+                           const char *buf,
+                           size_t count)
+{
+    int val;
+    int ret;
+
+    ret = sscanf(buf, "%d", &val);
+    if (ret != 1) {
+        pr_err("Wrong input, %s\n", buf);
+        return -EINVAL;
+    }
+
+    if (val <= 0 || val > SFE_MAX_CONNECTION_NUM) {
+        pr_err("Input value %d is invalid. It should be between 1 and %d\n",
+               val, SFE_MAX_CONNECTION_NUM);
+        return -EINVAL;
+    }
+
+    max_ipv4_conn = val;
+    return count;
+}
+
+/*
+ * sfe_get_ipv6_max_conn_threshold()
+ *	Get current IPv6 max connection threshold.
+ */
+static ssize_t sfe_get_ipv6_max_conn_threshold(struct device *dev,
+                           struct device_attribute *attr,
+                           char *buf)
+{
+    return snprintf(buf, PAGE_SIZE, "%d\n", max_ipv6_conn);
+}
+
+/*
+ * sfe_set_ipv6_max_conn_threshold()
+ *	Set IPv6 max connection threshold.
+ */
+static ssize_t sfe_set_ipv6_max_conn_threshold(struct device *dev,
+                           struct device_attribute *attr,
+                           const char *buf,
+                           size_t count)
+{
+    int val;
+    int ret;
+
+    ret = sscanf(buf, "%d", &val);
+    if (ret != 1) {
+        pr_err("Wrong input, %s\n", buf);
+        return -EINVAL;
+    }
+
+    if (val <= 0 || val > SFE_MAX_CONNECTION_NUM) {
+        pr_err("Input value %d is invalid. It should be between 1 and %d\n",
+               val, SFE_MAX_CONNECTION_NUM);
+        return -EINVAL;
+    }
+
+    max_ipv6_conn = val;
+    return count;
+}
+
+/*
  * sfe_set_flush_if_fls_breach()
  *	Enable or disable if connection should be flushed from SFE based on FLS breach
  */
@@ -2922,6 +3000,24 @@ static ssize_t sfe_set_flush_if_fls_breach(struct device *dev, struct device_att
  */
 static const struct device_attribute sfe_flush_if_fls_breach_attr =
 	__ATTR(flush_if_fls_breach,  0644, NULL, sfe_set_flush_if_fls_breach);
+
+/*
+ * sfe_ipv4_max_conn_threshold_attr
+ *	Runtime IPv4 max connection threshold.
+ */
+static const struct device_attribute sfe_ipv4_max_conn_threshold_attr =
+	__ATTR(ipv4_max_conn_threshold, 0644,
+	       sfe_get_ipv4_max_conn_threshold,
+	       sfe_set_ipv4_max_conn_threshold);
+
+/*
+ * sfe_ipv6_max_conn_threshold_attr
+ *	Runtime IPv6 max connection threshold.
+ */
+static const struct device_attribute sfe_ipv6_max_conn_threshold_attr =
+	__ATTR(ipv6_max_conn_threshold, 0644,
+	       sfe_get_ipv6_max_conn_threshold,
+	       sfe_set_ipv6_max_conn_threshold);
 
 /*
  * sfe_fls_register()
@@ -3047,6 +3143,25 @@ int sfe_init_if(void)
 		DEBUG_ERROR("failed to register flush if fls breach sysfs file: %d\n", result);
 		goto exit2;
 	}
+
+	/*
+	 * Create sys/sfe/ipv4_max_conn_threshold
+	 */
+	result = sysfs_create_file(sfe_ctx->sys_sfe, &sfe_ipv4_max_conn_threshold_attr.attr);
+	if (result) {
+		DEBUG_ERROR("failed to register ipv4 max conn threshold sysfs file: %d\n", result);
+		goto exit2;
+	}
+
+	/*
+	 * Create sys/sfe/ipv6_max_conn_threshold
+	 */
+	result = sysfs_create_file(sfe_ctx->sys_sfe, &sfe_ipv6_max_conn_threshold_attr.attr);
+	if (result) {
+		DEBUG_ERROR("failed to register ipv6 max conn threshold sysfs file: %d\n", result);
+		goto exit2;
+	}
+
 #ifdef SFE_SUPPORT_PPPOE
 	sfe_pppoe_mgr_init();
 #endif
