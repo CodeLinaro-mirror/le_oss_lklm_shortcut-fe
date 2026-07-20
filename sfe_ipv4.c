@@ -122,13 +122,14 @@ static char *sfe_ipv4_exception_events_string[SFE_IPV4_EXCEPTION_EVENT_LAST] = {
 	"FLS_HWM_FLUSH",
 	"TCP_CHECKSUM_ERROR",
 	"UDP_CHECKSUM_ERROR",
-	"VXLAN_GPE_NO_ROUTE"
+	"VXLAN_GPE_NO_ROUTE",
+	"FLOW_DIR_NOT_ACCEL"
 };
 
 static struct sfe_ipv4 __si;
 struct sfe_ipv4_msg *sfe_ipv4_sync_many_msg;
 uint32_t sfe_ipv4_sync_max_number;
-
+extern int sixth_tuple_enable;
 /*
  * sfe_ipv4_free_frag_skb_list
  * 	Free the complete fragment skb list in the failure cases.
@@ -190,7 +191,8 @@ static inline unsigned int sfe_ipv4_get_connection_match_hash(struct net_device 
  * On entry we must be holding the lock that protects the hash table.
  */
 struct sfe_ipv4_connection_match *
-sfe_ipv4_find_connection_match_rcu(struct sfe_ipv4 *si, struct net_device *dev, u8 protocol,
+sfe_ipv4_find_connection_match_rcu(struct sfe_ipv4 *si, struct net_device *dev,
+					struct sfe_l2_info *l2_info, u8 protocol,
 					__be32 src_ip, __be16 src_port,
 					__be32 dest_ip, __be16 dest_port)
 {
@@ -213,8 +215,24 @@ sfe_ipv4_find_connection_match_rcu(struct sfe_ipv4 *si, struct net_device *dev, 
 			continue;
 		}
 
-		this_cpu_inc(si->stats_pcpu->connection_match_hash_hits64);
+#ifdef SFE_SIXTH_TUPLE_ENABLE
+		if (unlikely(sixth_tuple_enable)) {
+			if (cm->match_dev != dev) {
+				continue;
+			}
 
+			/*
+			 * If no l2_info means ignoring the vlan hdr comparison
+			 * otherwise, it needs vlan hdr is equal.
+			 */
+			if (l2_info && ((cm->ingress_vlan_hdr_cnt != l2_info->vlan_hdr_cnt)
+					|| memcmp(cm->ingress_vlan_hdr, l2_info->vlan_hdr,
+						l2_info->vlan_hdr_cnt * sizeof(struct sfe_vlan_hdr)))) {
+				continue;
+			}
+		}
+#endif
+		this_cpu_inc(si->stats_pcpu->connection_match_hash_hits64);
 		break;
 	}
 
@@ -232,37 +250,33 @@ bool sfe_ipv4_get_single_conn_stats(struct sfe_ipv4_single_conn_stats *stats)
 	struct sfe_ipv4_connection_match *reply_cm;
 
 	rcu_read_lock();
-
-	original_cm = sfe_ipv4_find_connection_match_rcu(si, stats->org_dev, stats->tuple.protocol, stats->tuple.flow_ip, stats->tuple.flow_ident, stats->tuple.return_ip, stats->tuple.return_ident);
+	original_cm =  sfe_ipv4_find_connection_match_rcu(si, stats->org_dev, NULL, stats->tuple.protocol,
+			stats->tuple.flow_ip, stats->tuple.flow_ident,
+			stats->tuple.return_ip, stats->tuple.return_ident);
 	if (!original_cm) {
 		if (IPPROTO_TCP == stats->tuple.protocol) {
 			sfe_ipv4_exception_stats_inc(si, SFE_IPV4_EXCEPTION_EVENT_TCP_NO_CONNECTION_FAST_FLAGS);
 		} else {
 			sfe_ipv4_exception_stats_inc(si, SFE_IPV4_EXCEPTION_EVENT_UDP_NO_CONNECTION);
 		}
-		DEBUG_TRACE("Failed to find connection match entry for the following connection: protocol: %u, src_ip: %pI4, src_port: %u, dest_ip: %pI4, dest_port: %u\n", stats->tuple.protocol, &stats->tuple.flow_ip, stats->tuple.flow_ident, &stats->tuple.return_ip, stats->tuple.return_ident);
 		rcu_read_unlock();
+
+		DEBUG_TRACE("Failed to find connection match entry for the following connection:\n"
+			    "\tprotocol: %u, src_ip: %pI4, src_port: %u, dest_ip: %pI4, dest_port: %u\n",
+			    stats->tuple.protocol, &stats->tuple.flow_ip, stats->tuple.flow_ident,
+			    &stats->tuple.return_ip, stats->tuple.return_ident);
+
 		return false;
 	}
 
 	reply_cm = original_cm->counter_match;
-	if (!reply_cm) {
-		if (IPPROTO_TCP == stats->tuple.protocol) {
-			sfe_ipv4_exception_stats_inc(si, SFE_IPV4_EXCEPTION_EVENT_TCP_NO_CONNECTION_FAST_FLAGS);
-		} else {
-			sfe_ipv4_exception_stats_inc(si, SFE_IPV4_EXCEPTION_EVENT_UDP_NO_CONNECTION);
-		}
-		DEBUG_TRACE("Failed to find reverse match entry for the following connection: protocol: %u, src_ip: %pI4, src_port: %u, dest_ip: %pI4, dest_port: %u\n", stats->tuple.protocol, &stats->tuple.flow_ip, stats->tuple.flow_ident, &stats->tuple.return_ip, stats->tuple.return_ident);
-		rcu_read_unlock();
-		return false;
+	stats->rx_packet_count += original_cm->rx_packet_count64;
+	stats->rx_byte_count += original_cm->rx_byte_count64;
+	if (reply_cm) {
+		stats->tx_packet_count += reply_cm->rx_packet_count64;
+		stats->tx_byte_count += reply_cm->rx_byte_count64;
 	}
-
 	rcu_read_unlock();
-
-	stats->rx_packet_count = original_cm->rx_packet_count64;
-	stats->rx_byte_count = original_cm->rx_byte_count64;
-	stats->tx_packet_count = reply_cm->rx_packet_count64;
-	stats->tx_byte_count = reply_cm->rx_byte_count64;
 	return true;
 }
 EXPORT_SYMBOL(sfe_ipv4_get_single_conn_stats);
@@ -578,7 +592,7 @@ static inline unsigned int sfe_ipv4_get_connection_hash(u8 protocol, __be32 src_
  *
  * On entry we must be holding the lock that protects the hash table.
  */
-static inline struct sfe_ipv4_connection *sfe_ipv4_find_connection(struct sfe_ipv4 *si, u32 protocol,
+struct sfe_ipv4_connection *sfe_ipv4_find_connection(struct sfe_ipv4 *si, u32 flow_rule_id, u32 protocol,
 									    __be32 src_ip, __be16 src_port,
 									    __be32 dest_ip, __be16 dest_port)
 {
@@ -594,11 +608,15 @@ static inline struct sfe_ipv4_connection *sfe_ipv4_find_connection(struct sfe_ip
 	 * So no need to re-order entry for these requests
 	 */
 	while (c) {
+		if (c->flow_rule_id != flow_rule_id || c->protocol != protocol) {
+			c = c->next;
+			continue;
+		}
+
 		if ((c->src_port == src_port)
 		    && (c->dest_port == dest_port)
 		    && (c->src_ip == src_ip)
-		    && (c->dest_ip == dest_ip)
-		    && (c->protocol == protocol)) {
+		    && (c->dest_ip == dest_ip)) {
 			return c;
 		}
 
@@ -796,7 +814,7 @@ static void sfe_ipv4_gen_sync_connection(struct sfe_ipv4 *si, struct sfe_ipv4_co
 	sis->src_dev = original_cm->match_dev;
 	sis->src_packet_count = original_cm->rx_packet_count64;
 	sis->src_byte_count = original_cm->rx_byte_count64;
-
+	sis->flow_rule_id = c->flow_rule_id;
 	if (reply_cm) {
 		sis->dest_td_max_window = reply_cm->protocol_state.tcp.max_win;
 		sis->dest_td_end = reply_cm->protocol_state.tcp.end;
@@ -990,6 +1008,7 @@ static void sfe_destroy_ipv4_ppe_rfs_rule(struct sfe_ipv4_connection_match *matc
 	pr4rd.tuple.flow_ident = ntohs(match_dir->match_src_port);
 	pr4rd.tuple.return_ip = ntohl(match_dir->match_dest_ip);
 	pr4rd.tuple.return_ident = ntohs(match_dir->match_dest_port);
+	pr4rd.tuple.flow_rule_id = match_dir->connection->flow_rule_id;
 	pr4rd.conn_rule.flow_ip_xlate = ntohl(match_dir->xlate_src_ip);
 	pr4rd.conn_rule.flow_ident_xlate = ntohs(match_dir->xlate_src_port);
 	pr4rd.conn_rule.return_ip_xlate = ntohl(match_dir->xlate_dest_ip);
@@ -1029,10 +1048,10 @@ void sfe_ipv4_flush_connection(struct sfe_ipv4 *si,
 		/*
 		 * Delete RFS rule in either direction if rfs is present in that direction.
 		 */
-		if (flow_match && flow_match->rfs_enabled) {
+		if (flow_match && (flow_match->rfs_valid_flags & SFE_CONN_MATCH_RFS_VALID_FLAG_RFS_ENABLED)) {
 			sfe_destroy_ipv4_ppe_rfs_rule(flow_match);
 		}
-		if (return_match && return_match->rfs_enabled) {
+		if (return_match && (return_match->rfs_valid_flags & SFE_CONN_MATCH_RFS_VALID_FLAG_RFS_ENABLED)) {
 			sfe_destroy_ipv4_ppe_rfs_rule(return_match);
 		}
 	}
@@ -1535,7 +1554,7 @@ int sfe_ipv4_recv(struct net_device *dev, struct sk_buff *skb, struct sfe_l2_inf
 #endif
 
 	if (IPPROTO_ICMP == protocol) {
-		return sfe_ipv4_recv_icmp(si, skb, dev, len, iph, ihl);
+		return sfe_ipv4_recv_icmp(si, skb, dev, len, iph, ihl, l2_info);
 	}
 
 #ifdef SFE_GRE_TUN_ENABLE
@@ -1703,61 +1722,92 @@ static void sfe_ipv4_match_entry_set_trustsec(
 	cm->egress_trustsec_hdr.sgt = egress_sgt;
 }
 
-void sfe_ipv4_update_rule(struct sfe_ipv4_rule_create_msg *msg)
+/*
+ * sfe_ipv4_unidir_rule_update()
+ *      Updates the values of match entries.
+ */
+static void sfe_ipv4_unidir_rule_update(struct sfe_ipv4_connection *conn, struct sfe_rule_update_msg *update_msg)
 {
-	struct sfe_ipv4_connection *c;
-	struct sfe_ipv4 *si = &__si;
+	struct sfe_ipv4_connection_match *match_dir;
+	u32 qos_tag;
+	u8 int_pri, dscp;
+	char direction[] = "reply";
 
-	spin_lock_bh(&si->lock);
-
-	c = sfe_ipv4_find_connection(si,
-					      msg->tuple.protocol,
-					      msg->tuple.flow_ip,
-					      msg->tuple.flow_ident,
-					      msg->tuple.return_ip,
-					      msg->tuple.return_ident);
-	if (c != NULL) {
-		sfe_ipv4_update_protocol_state(c, msg);
+	if (update_msg->info.unidir.update_dir == SFE_FLOW_RULE_DIRECTION_FLOW) {
+		match_dir = conn->original_match;
+		qos_tag = update_msg->info.unidir.qos.flow_qos_tag;
+		int_pri = update_msg->info.unidir.qos.flow_int_pri;
+		dscp = update_msg->info.unidir.dscp.flow_dscp;
+	} else {
+		match_dir = conn->reply_match;
+		qos_tag = update_msg->info.unidir.qos.return_qos_tag;
+		int_pri = update_msg->info.unidir.qos.return_int_pri;
+		dscp = update_msg->info.unidir.dscp.return_dscp;
 	}
 
-	spin_unlock_bh(&si->lock);
+	match_dir->flow_accel = true;
+
+	if (update_msg->flags & SFE_UPDATE_RULE_QOS_VALID) {
+		match_dir->priority = qos_tag;
+		match_dir->dscp = dscp << SFE_IPV4_DSCP_SHIFT;
+#if defined(SFE_PPE_QOS_SUPPORTED)
+		match_dir->int_pri = int_pri;
+#endif
+	}
+
+	if (update_msg->info.unidir.update_dir == SFE_FLOW_RULE_DIRECTION_FLOW) {
+		snprintf(direction, sizeof(direction), "%s", "orig");
+	}
+
+	DEBUG_TRACE("%px: matched direction(%s) updated qos_tag:%x int_pri:%x\n", conn, direction, qos_tag, int_pri);
 }
 
 /*
- * sfe_ipv4_mark_rule_update()
+ * sfe_ipv4_rule_update()
  *      Updates the mark values of match entries.
  */
-bool sfe_ipv4_mark_rule_update(struct sfe_connection_mark *mark)
+bool sfe_ipv4_rule_update(struct sfe_rule_update_msg *update_msg)
 {
 	struct sfe_ipv4_connection *c;
 	struct sfe_ipv4 *si = &__si;
 
 	spin_lock_bh(&si->lock);
-	c = sfe_ipv4_find_connection(si, mark->protocol,
-				     mark->src_ip[0],
-				     mark->src_port,
-				     mark->dest_ip[0],
-				     mark->dest_port);
+	c = sfe_ipv4_find_connection(si, update_msg->flow_rule_id,
+				     update_msg->protocol,
+				     update_msg->src_ip[0],
+				     update_msg->src_port,
+				     update_msg->dest_ip[0],
+				     update_msg->dest_port);
 	if (!c) {
 		spin_unlock_bh(&si->lock);
-		DEBUG_WARN("%px: connection not found for mark update\n", mark);
+		DEBUG_WARN("%px: connection not found for update_msg update\n", update_msg);
 		return false;
 	}
 
-	switch (mark->type) {
-	case SFE_CONNECTION_MARK_TYPE_CONNMARK:
-		c->original_match->mark = mark->flow_mark;
-		if (c->reply_match) {
-			c->reply_match->mark = mark->return_mark;
-		}
-		spin_unlock_bh(&si->lock);
+	switch (update_msg->type) {
+	case SFE_CONNECTION_MARK_TYPE_UNIDIR_MARK:
+		sfe_ipv4_unidir_rule_update(c, update_msg);
 		break;
 
-	case SFE_CONNECTION_MARK_TYPE_SAWFMARK:
-		if (mark->flags & SFE_SAWF_MARK_FLOW_VALID) {
-			c->original_match->mark = mark->flow_mark;
-			c->original_match->svc_id = mark->flow_svc_id;
-			if (mark->flags & SFE_SAWF_MARK_DEPRIO) {
+	case SFE_CONNECTION_MARK_TYPE_CONNMARK:
+		c->original_match->mark = update_msg->info.connmark.flow_mark;
+		if (c->reply_match) {
+			c->reply_match->mark = update_msg->info.connmark.return_mark;
+		}
+		DEBUG_TRACE("%px: flow/return mark updated with %x/%x\n", c, update_msg->info.connmark.flow_mark, update_msg->info.connmark.return_mark);
+		break;
+
+	case SFE_CONNECTION_MARK_TYPE_BIDIR_SAWF_MARK:
+		if (update_msg->flags & SFE_UPDATE_RULE_SAWF_FLOW_VALID) {
+			/*
+			 * Todo: Make the read write of flow_mark atomic
+			 * No lock is added here because the mark update does not occur until
+			 * the update function is invoked. Therefore, flow_mark is only read
+			 * after the update is completed.
+			 */
+			c->original_match->mark = update_msg->info.sawf.flow_mark;
+			c->original_match->svc_id = update_msg->info.sawf.flow_svc_id;
+			if (update_msg->flags & SFE_UPDATE_RULE_SAWF_DEPRIO) {
 				c->original_match->flags &= ~SFE_IPV4_CONNECTION_MATCH_FLAG_MARK;
 				c->original_match->sawf_valid = false;
 			} else {
@@ -1767,10 +1817,10 @@ bool sfe_ipv4_mark_rule_update(struct sfe_connection_mark *mark)
 		}
 
 		if (c->reply_match) {
-			if (mark->flags & SFE_SAWF_MARK_RETURN_VALID) {
-				c->reply_match->mark = mark->return_mark;
-				c->reply_match->svc_id = mark->return_svc_id;
-				if (mark->flags & SFE_SAWF_MARK_DEPRIO) {
+			if (update_msg->flags & SFE_UPDATE_RULE_SAWF_RETURN_VALID) {
+				c->reply_match->mark = update_msg->info.sawf.return_mark;
+				c->reply_match->svc_id = update_msg->info.sawf.return_svc_id;
+				if (update_msg->flags & SFE_UPDATE_RULE_SAWF_DEPRIO) {
 					c->reply_match->flags &= ~SFE_IPV4_CONNECTION_MATCH_FLAG_MARK;
 					c->reply_match->sawf_valid = false;
 				} else {
@@ -1779,20 +1829,17 @@ bool sfe_ipv4_mark_rule_update(struct sfe_connection_mark *mark)
 				}
 			}
 		}
-		spin_unlock_bh(&si->lock);
+		DEBUG_TRACE("%px: flow/return mark updated with %x/%x\n", c, update_msg->info.sawf.flow_mark, update_msg->info.sawf.return_mark);
 		break;
 
 	default:
-		spin_unlock_bh(&si->lock);
-		DEBUG_WARN("%px: unsupported mark type: %d\n", mark, mark->type);
+		DEBUG_WARN("%px: unsupported update_msg type: %d\n", update_msg, update_msg->type);
 		break;
 	}
 
-	DEBUG_TRACE("%px: flow/return mark updated with %x/%x\n",
-			c, mark->flow_mark, mark->return_mark);
+	spin_unlock_bh(&si->lock);
 	return true;
 }
-EXPORT_SYMBOL(sfe_ipv4_mark_rule_update);
 
 /*
  * sfe_ipv4_xmit_eth_type_check()
@@ -2211,7 +2258,7 @@ sfe_response_t sfe_ipv4_create_mc_rule(struct sfe_ipv4_mc_rule_create_msg *msg)
 	struct sfe_ipv4_connection_match *original_cm;
 	struct net_device *dest_dev;
 	struct net_device *src_dev;
-	struct sfe_ipv4_5tuple *tuple = &msg->tuple;
+	struct sfe_ipv4_tuple *tuple = &msg->tuple;
 	s32 flow_interface_num = msg->conn_rule.flow_top_interface_num;
 	unsigned int src_if_idx;
 	uint32_t if_min_mtu;
@@ -2304,7 +2351,7 @@ sfe_response_t sfe_ipv4_create_mc_rule(struct sfe_ipv4_mc_rule_create_msg *msg)
 	 * Check to see if there is already a flow that matches the rule we're
 	 * trying to create.  If there is then we can't create a new one.
 	 */
-	c_old = sfe_ipv4_find_connection(si,
+	c_old = sfe_ipv4_find_connection(si, msg->tuple.flow_rule_id,
 					msg->tuple.protocol,
 					msg->tuple.flow_ip,
 					msg->tuple.flow_ident,
@@ -2364,7 +2411,6 @@ update_done:
 	original_cm->counter_match = NULL;
 
 #if defined(SFE_RFS_SUPPORTED)
-	original_cm->rfs_enabled = false;
 	original_cm->flow_mtu = msg->conn_rule.flow_mtu;
 	original_cm->flow_interface_num = msg->conn_rule.flow_interface_num;
 	original_cm->flow_top_interface_num = msg->conn_rule.flow_top_interface_num;
@@ -2434,13 +2480,12 @@ update_done:
 #ifdef CONFIG_NF_FLOW_COOKIE
 	original_cm->flow_cookie = 0;
 #endif
-#ifdef CONFIG_XFRM
+
 	if (msg->valid_flags & SFE_RULE_CREATE_DIRECTION_VALID) {
 		original_cm->flow_accel = msg->direction_rule.flow_accel;
 	} else {
-		original_cm->flow_accel = 1;
+		original_cm->flow_accel = true;
 	}
-#endif
 
 	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_FLOW_SRC_INTERFACE_CHECK) {
 		original_cm->flags |= SFE_IPV4_CONNECTION_MATCH_FLAG_SRC_INTERFACE_CHECK;
@@ -2491,6 +2536,7 @@ update_done:
 	 * Fill in the ipv4_connection object.
 	 */
 	c->protocol = tuple->protocol;
+	c->flow_rule_id = tuple->flow_rule_id;
 	c->src_ip = tuple->flow_ip;
 	c->src_ip_xlate =  msg->conn_rule.flow_ip_xlate;
 	c->src_port = tuple->flow_ident;
@@ -2512,7 +2558,7 @@ update_done:
 	/*
 	 * We have everything we need!
 	 */
-	DEBUG_INFO("%px: NEW Multicast connection - p: %d\n"
+	DEBUG_INFO("%px: NEW Multicast connection - SN: %u p: %d\n"
 		   "original_cm: match_dev=src_dev: %s %d %pM\n"
 		   " xmit_src_mac: %pM\n"
 		   " xmit_dest_mac: %pM\n"
@@ -2521,7 +2567,7 @@ update_done:
 		   "flow_ip_xlate: %pI4:%u\n"
 		   "flow_mac: %pM\n"
 		   "flags: valid=%x src_mac_valid=%x\n",
-		   c, tuple->protocol,
+		   c, tuple->flow_rule_id, tuple->protocol,
 		   original_cm->match_dev->name, original_cm->match_dev->ifindex, original_cm->match_dev->dev_addr,
 		   original_cm->xmit_src_mac, original_cm->xmit_dest_mac, original_cm->flags, original_cm->l2_hdr_size,
 		   &tuple->flow_ip, ntohs(tuple->flow_ident),
@@ -2555,7 +2601,7 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	struct net_device *src_dev;
 	struct net_device *local_dest_dev;
 	struct net_device *local_src_dev;
-	struct sfe_ipv4_5tuple *tuple = &msg->tuple;
+	struct sfe_ipv4_tuple *tuple = &msg->tuple;
 	void *orig_conn;
 	void *reply_conn;
 	s32 flow_interface_num = msg->conn_rule.flow_top_interface_num;
@@ -2679,7 +2725,7 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	 * Check to see if there is already a flow that matches the rule we're
 	 * trying to create.  If there is then we can't create a new one.
 	 */
-	c_old = sfe_ipv4_find_connection(si,
+	c_old = sfe_ipv4_find_connection(si, msg->tuple.flow_rule_id,
 					msg->tuple.protocol,
 					msg->tuple.flow_ip,
 					msg->tuple.flow_ident,
@@ -2726,13 +2772,30 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	original_cm->xlate_dest_port = msg->conn_rule.return_ident_xlate;
 
 #if defined(SFE_RFS_SUPPORTED)
-	original_cm->rfs_enabled = false;
 	original_cm->flow_mtu = msg->conn_rule.flow_mtu;
 	original_cm->return_mtu = msg->conn_rule.return_mtu;
 	original_cm->flow_interface_num = msg->conn_rule.flow_interface_num;
 	original_cm->flow_top_interface_num = msg->conn_rule.flow_top_interface_num;
 	original_cm->return_interface_num = msg->conn_rule.return_interface_num;
 	original_cm->return_top_interface_num = msg->conn_rule.return_top_interface_num;
+#endif
+
+#if defined(SFE_ESP_SPI_PASSTH_ENABLE)
+	/*
+	 * In case if this flow is IPSec passthrough flow, set the SPI as the port
+	 * numbers to have SPI as a key for connection match.
+	 * The 32 bit SPI is stored as below:
+	 * ------------------------------------------------------------
+	 * |  Source port (16 bits)      |  Destination port (16 bits)|
+	 * ------------------------------------------------------------
+	 * 31				15			      0
+	 */
+	if ((sfe_is_spi_based_esp_passthrough_enabled()) && (msg->rule_flags & SFE_RULE_CREATE_FLAG_ESP_PASSTHROUGH)) {
+		original_cm->match_src_port = SFE_ESP_SPI_TO_SPORT(msg->spi_rule.l_spi);
+		original_cm->xlate_src_port = SFE_ESP_SPI_TO_SPORT(msg->spi_rule.l_spi);
+		original_cm->match_dest_port = SFE_ESP_SPI_TO_DPORT(msg->spi_rule.l_spi);
+		original_cm->xlate_dest_port = SFE_ESP_SPI_TO_DPORT(msg->spi_rule.l_spi);
+	}
 #endif
 
 	if (tuple->protocol == IPPROTO_GRE) {
@@ -2922,20 +2985,19 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 #endif
 
 	if (((IPPROTO_IPV6 == tuple->protocol) || (IPPROTO_GRE == tuple->protocol) || (IPPROTO_ESP == tuple->protocol) ||
-				(IPPROTO_L2TP == tuple->protocol)) && !sfe_ipv4_is_local_ip(si, original_cm->match_dest_ip)) {
+				(IPPROTO_L2TP == tuple->protocol)) && !sfe_ipv4_is_local_ip(si, original_cm->xlate_dest_ip)) {
 		original_cm->flags |= SFE_IPV4_CONNECTION_MATCH_FLAG_PASSTHROUGH;
 	}
 
 #ifdef CONFIG_NF_FLOW_COOKIE
 	original_cm->flow_cookie = 0;
 #endif
-#ifdef CONFIG_XFRM
+
 	if (msg->valid_flags & SFE_RULE_CREATE_DIRECTION_VALID) {
 		original_cm->flow_accel = msg->direction_rule.flow_accel;
 	} else {
-		original_cm->flow_accel = 1;
+		original_cm->flow_accel = true;
 	}
-#endif
 
 	/*
 	 * Check if TSO is enabled on the bottom interface. This flag is used for PPPoE TCP flows.
@@ -3126,13 +3188,30 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	reply_cm->xlate_dest_port = tuple->flow_ident;
 
 #if defined(SFE_RFS_SUPPORTED)
-	reply_cm->rfs_enabled = false;
 	reply_cm->flow_mtu = msg->conn_rule.return_mtu;
 	reply_cm->return_mtu = msg->conn_rule.flow_mtu;
 	reply_cm->flow_interface_num = msg->conn_rule.return_interface_num;
 	reply_cm->flow_top_interface_num = msg->conn_rule.return_top_interface_num;
 	reply_cm->return_interface_num = msg->conn_rule.flow_interface_num;
 	reply_cm->return_top_interface_num = msg->conn_rule.flow_top_interface_num;
+#endif
+
+#if defined(SFE_ESP_SPI_PASSTH_ENABLE)
+	/*
+	 * In case if this flow is IPSec passthrough flow, set the SPI as the port
+	 * numbers to have SPI as a key for connection match.
+	 * The 32 bit SPI is stored as below:
+	 * ------------------------------------------------------------
+	 * |  Source port (16 bits)      |  Destination port (16 bits)|
+	 * ------------------------------------------------------------
+	 * 31				15			      0
+	 */
+	if ((sfe_is_spi_based_esp_passthrough_enabled()) && (msg->rule_flags & SFE_RULE_CREATE_FLAG_ESP_PASSTHROUGH)) {
+		reply_cm->match_src_port = SFE_ESP_SPI_TO_SPORT(msg->spi_rule.r_spi);
+		reply_cm->xlate_src_port = SFE_ESP_SPI_TO_SPORT(msg->spi_rule.r_spi);
+		reply_cm->match_dest_port = SFE_ESP_SPI_TO_DPORT(msg->spi_rule.r_spi);
+		reply_cm->xlate_dest_port = SFE_ESP_SPI_TO_DPORT(msg->spi_rule.r_spi);
+	}
 #endif
 
 	if (tuple->protocol == IPPROTO_GRE) {
@@ -3235,7 +3314,7 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	}
 
 	if (((IPPROTO_IPV6 == tuple->protocol) || (IPPROTO_GRE == tuple->protocol) || (IPPROTO_ESP == tuple->protocol)
-				|| (IPPROTO_L2TP == tuple->protocol)) && !sfe_ipv4_is_local_ip(si, reply_cm->match_dest_ip)) {
+				|| (IPPROTO_L2TP == tuple->protocol)) && !sfe_ipv4_is_local_ip(si, reply_cm->xlate_dest_ip)) {
 		reply_cm->flags |= SFE_IPV4_CONNECTION_MATCH_FLAG_PASSTHROUGH;
 	}
 
@@ -3279,7 +3358,7 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	/*
 	 * We set the UDP sock pointer as valid only for decap direction.
 	 */
-	if (sk && udp_sk(sk)->encap_type && sfe_ipv4_is_local_ip(si, reply_cm->match_dest_ip)) {
+	if (sk && udp_sk(sk)->encap_type && sfe_ipv4_is_local_ip(si, reply_cm->xlate_dest_ip)) {
 		if (!refcount_inc_not_zero(&sk->sk_refcnt)) {
 			this_cpu_inc(si->stats_pcpu->connection_create_failures64);
 			spin_unlock_bh(&si->lock);
@@ -3325,8 +3404,14 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 		}
 	}
 
+	/*
+	 * When there are more than 1 qdisc configured in FROM/TO interface heirarchy, SFE uses the
+	 * corresponding top interface to send the packet. Check if SFE should add L2 header which is
+	 * required when the top interface is VLAN as Linux adds only the VLAN tag and expects the L2
+	 * header to be present or the top interface is not found.
+	 */
 	if (disable_l2_flow) {
-		if (!reply_cm->top_interface_dev || is_vlan_dev(reply_cm->top_interface_dev)) {
+		if (!original_cm->top_interface_dev || is_vlan_dev(original_cm->top_interface_dev)) {
 			reply_cm->flags |= SFE_IPV4_CONNECTION_MATCH_FLAG_WRITE_L2_HDR;
 
 			/*
@@ -3342,7 +3427,7 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	}
 
 	if (disable_l2_return) {
-		if (!original_cm->top_interface_dev || is_vlan_dev(original_cm->top_interface_dev)) {
+		if (!reply_cm->top_interface_dev || is_vlan_dev(reply_cm->top_interface_dev)) {
 			original_cm->flags |= SFE_IPV4_CONNECTION_MATCH_FLAG_WRITE_L2_HDR;
 
 			/*
@@ -3488,14 +3573,12 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 #ifdef CONFIG_NF_FLOW_COOKIE
 	reply_cm->flow_cookie = 0;
 #endif
-#ifdef CONFIG_XFRM
+
 	if (msg->valid_flags & SFE_RULE_CREATE_DIRECTION_VALID) {
 		reply_cm->flow_accel = msg->direction_rule.return_accel;
 	} else {
-		reply_cm->flow_accel = 1;
+		reply_cm->flow_accel = true;
 	}
-
-#endif
 
 	/*
 	 * Check if TSO is enabled on the bottom interface. This flag is used for PPPoE TCP flows.
@@ -3638,6 +3721,24 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 		reply_cm->flags |= SFE_IPV4_CONNECTION_MATCH_FLAG_XLATE_DEST;
 	}
 
+#if defined(SFE_RFS_SUPPORTED)
+	/*
+	 * Set outer_flow to true if flag OUTER_FLOW is valid.
+	 */
+	if (msg->valid_flags & SFE_RULE_CREATE_TUNNEL_OUTER_FLOW_VALID) {
+		original_cm->rfs_valid_flags |= SFE_CONN_MATCH_RFS_VALID_FLAG_TUNNEL_OUTER_FLOW;
+		reply_cm->rfs_valid_flags |= SFE_CONN_MATCH_RFS_VALID_FLAG_TUNNEL_OUTER_FLOW;
+	}
+
+	/*
+	 * Set tun_flow to true if flag TUNNEL_FLOW is valid.
+	 */
+	if (msg->valid_flags & SFE_RULE_CREATE_TUNNEL_FLOW_VALID) {
+		original_cm->rfs_valid_flags |= SFE_CONN_MATCH_RFS_VALID_FLAG_TUNNEL_FLOW;
+		reply_cm->rfs_valid_flags |= SFE_CONN_MATCH_RFS_VALID_FLAG_TUNNEL_FLOW;
+	}
+#endif
+
 	/*
 	 * Initialize the protocol-specific information that we track.
 	 */
@@ -3695,6 +3796,7 @@ sfe_response_t sfe_ipv4_create_rule(struct sfe_ipv4_rule_create_msg *msg)
 	 * Fill in the ipv4_connection object.
 	 */
 	c->protocol = tuple->protocol;
+	c->flow_rule_id = tuple->flow_rule_id;
 	c->src_ip = tuple->flow_ip;
 	c->src_ip_xlate =  msg->conn_rule.flow_ip_xlate;
 	c->src_port = tuple->flow_ident;
@@ -3773,9 +3875,25 @@ sk_refcount_dec:
 	}
 
 free_reply_cm:
+	if (reply_cm->qdisc_xmit_dev) {
+		dev_put(reply_cm->xmit_dev);
+	}
+
+	if (reply_cm->top_interface_dev) {
+		dev_put(reply_cm->top_interface_dev);
+	}
+
 	kfree(reply_cm);
 
 free_original_cm:
+	if (original_cm->qdisc_xmit_dev) {
+		dev_put(original_cm->xmit_dev);
+	}
+
+	if (original_cm->top_interface_dev) {
+		dev_put(original_cm->top_interface_dev);
+	}
+
 	kfree(original_cm);
 
 free_conn_obj:
@@ -3803,7 +3921,7 @@ void sfe_ipv4_connection_rule_rfs_valid_set(struct sfe_ipv4_connection_match *ma
 		return;
 	}
 	spin_lock_bh(&si->lock);
-	match->rfs_enabled = true;
+	match->rfs_valid_flags |=  SFE_CONN_MATCH_RFS_VALID_FLAG_RFS_ENABLED;
 	spin_unlock_bh(&si->lock);
 	return;
 }
@@ -3812,12 +3930,13 @@ void sfe_ipv4_connection_rule_rfs_valid_set(struct sfe_ipv4_connection_match *ma
  * sfe_ipv4_connection_rule_get()
  *	Gets the pointer to the sfe connection corresponding to 5 tuple.
  */
-struct sfe_ipv4_connection *sfe_ipv4_connection_rule_get_by_tuple(struct sfe_ipv4_5tuple *tuple) {
+struct sfe_ipv4_connection *sfe_ipv4_connection_rule_get_by_tuple(struct sfe_ipv4_tuple *tuple) {
 	struct sfe_ipv4 *si = &__si;
 	struct sfe_ipv4_connection *c;
 
 	spin_lock_bh(&si->lock);
-	c = sfe_ipv4_find_connection(si, tuple->protocol, tuple->flow_ip, tuple->flow_ident, tuple->return_ip, tuple->return_ident);
+	c = sfe_ipv4_find_connection(si, tuple->flow_rule_id, tuple->protocol,
+			tuple->flow_ip, tuple->flow_ident, tuple->return_ip, tuple->return_ident);
 	if (!c) {
 		DEBUG_TRACE("connection does not exist - p: %d, s: %pI4:%u, d: %pI4:%u\n",
 			    tuple->protocol, &tuple->flow_ip, ntohs(tuple->flow_ident),
@@ -3838,7 +3957,7 @@ void sfe_ipv4_destroy_rule(struct sfe_ipv4_rule_destroy_msg *msg)
 	struct sfe_ipv4 *si = &__si;
 	struct sfe_ipv4_connection *c;
 	bool ret;
-	struct sfe_ipv4_5tuple *tuple = &msg->tuple;
+	struct sfe_ipv4_tuple *tuple = &msg->tuple;
 
 	this_cpu_inc(si->stats_pcpu->connection_destroy_requests64);
 	spin_lock_bh(&si->lock);
@@ -3847,7 +3966,7 @@ void sfe_ipv4_destroy_rule(struct sfe_ipv4_rule_destroy_msg *msg)
 	 * Check to see if we have a flow that matches the rule we're trying
 	 * to destroy.  If there isn't then we can't destroy it.
 	 */
-	c = sfe_ipv4_find_connection(si, tuple->protocol, tuple->flow_ip, tuple->flow_ident,
+	c = sfe_ipv4_find_connection(si, tuple->flow_rule_id, tuple->protocol, tuple->flow_ip, tuple->flow_ident,
 					      tuple->return_ip, tuple->return_ident);
 	if (!c) {
 		spin_unlock_bh(&si->lock);
@@ -4148,6 +4267,7 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 	struct sfe_ipv4_connection_match *reply_cm;
 	int protocol;
 	int status;
+	u32 flow_rule_id;
 	struct net_device *src_dev;
 	__be32 src_ip;
 	__be32 src_ip_xlate;
@@ -4186,6 +4306,7 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 #ifdef CONFIG_NF_FLOW_COOKIE
 	int src_flow_cookie, dst_flow_cookie;
 #endif
+	bool reply_flow_accel = 0;
 
 	spin_lock_bh(&si->lock);
 
@@ -4207,6 +4328,7 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 	original_cm = c->original_match;
 	reply_cm = c->reply_match;
 
+	flow_rule_id = c->flow_rule_id;
 	protocol = c->protocol;
 	src_dev = c->original_dev;
 	src_ip = c->src_ip;
@@ -4271,6 +4393,7 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 #ifdef CONFIG_NF_FLOW_COOKIE
 		dst_flow_cookie = reply_cm->flow_cookie;
 #endif
+		reply_flow_accel = reply_cm->flow_accel;
 
 	} else {
 		dest_priority = 0;
@@ -4298,7 +4421,7 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 #endif
 	spin_unlock_bh(&si->lock);
 
-	ws->msg_len = snprintf(ws->msg, length, "\t\t<connection "
+	ws->msg_len = snprintf(ws->msg, SFE_IPV4_DEBUG_MSG_SIZE, "\t\t<connection "
 				"protocol=\"%u\" "
 				"src_dev=\"%s\" "
 				"src_ip=\"%pI4\" src_ip_xlate=\"%pI4\" "
@@ -4308,6 +4431,7 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 				"src_mark=\"%08x\" "
 				"src_fast_xmit=\"%s\" "
 				"orig_cm_flags=\"%08x\" "
+				"orig_dir_en=\"%s\" "
 				"dest_dev=\"%s\" "
 				"dest_ip=\"%pI4\" dest_ip_xlate=\"%pI4\" "
 				"dest_port=\"%u\" dest_port_xlate=\"%u\" "
@@ -4316,10 +4440,12 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 				"dest_mark=\"%08x\" "
 				"reply_fast_xmit=\"%s\" "
 				"reply_cm_flags=\"%08x\" "
+				"reply_dir_en=\"%s\" "
 #ifdef CONFIG_NF_FLOW_COOKIE
 				"src_flow_cookie=\"%d\" dst_flow_cookie=\"%d\" "
 #endif
-				"last_sync=\"%llu\" ",
+				"last_sync=\"%llu\" "
+				"flow_rule_id=\"%u\" ",
 				protocol,
 				src_dev->name,
 				&src_ip, &src_ip_xlate,
@@ -4329,6 +4455,7 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 				src_mark,
 				original_fast_xmit ? "Yes" : "No",
 				original_cm_flags,
+				original_cm->flow_accel ? "Yes" : "No",
 				dest_dev->name,
 				&dest_ip, &dest_ip_xlate,
 				ntohs(dest_port), ntohs(dest_port_xlate),
@@ -4337,10 +4464,11 @@ static int sfe_ipv4_debug_dev_read_connections_connection(struct sfe_ipv4 *si, s
 				dest_mark,
 				reply_fast_xmit ? "Yes" : "No",
 				reply_cm_flags,
+				reply_flow_accel ? "Yes" : "No",
 #ifdef CONFIG_NF_FLOW_COOKIE
 				src_flow_cookie, dst_flow_cookie,
 #endif
-				last_sync_jiffies);
+				last_sync_jiffies, flow_rule_id);
 
 	if (orig_ingress_vlan_hdr_cnt || orig_egress_vlan_hdr_cnt) {
 		ws->msg_len += snprintf(ws->msg + ws->msg_len, length - ws->msg_len,

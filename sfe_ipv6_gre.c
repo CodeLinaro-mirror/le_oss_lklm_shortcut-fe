@@ -2,7 +2,7 @@
  * sfe_ipv6_gre.c
  *	Shortcut forwarding engine file for IPv6 GRE
  *
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidaries.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: ISC
  */
 
@@ -65,10 +65,10 @@ int sfe_ipv6_recv_gre(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 #ifdef CONFIG_NF_FLOW_COOKIE
 	cm = si->sfe_flow_cookie_table[skb->flow_cookie & SFE_FLOW_COOKIE_MASK].match;
 	if (unlikely(!cm)) {
-		cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_GRE, src_ip, 0, dest_ip, 0);
+		cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_GRE, src_ip, 0, dest_ip, 0);
 	}
 #else
-	cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_GRE, src_ip, 0, dest_ip, 0);
+	cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_GRE, src_ip, 0, dest_ip, 0);
 #endif
 	if (unlikely(!cm)) {
 		rcu_read_unlock();
@@ -227,6 +227,13 @@ int sfe_ipv6_recv_gre(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	 * protocol handler will be valid only in decap-path.
 	 */
 	if (cm->proto) {
+		/*
+		 * Set SKB packet type to PACKET_HOST
+		 */
+		if (unlikely(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PACKET_HOST)) {
+			skb->pkt_type = PACKET_HOST;
+		}
+
 		struct inet6_protocol *ipprot = cm->proto;
 		skb_pull(skb, ihl);
 		skb_reset_transport_header(skb);
@@ -263,13 +270,6 @@ int sfe_ipv6_recv_gre(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	}
 
 	/*
-	 * Set SKB packet type to PACKET_HOST
-	 */
-	if (unlikely(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PACKET_HOST)) {
-		skb->pkt_type = PACKET_HOST;
-	}
-
-	/*
 	 * If our packet is larger than the MTU of the transmit interface then
 	 * we can't forward it easily.
 	 */
@@ -280,6 +280,13 @@ int sfe_ipv6_recv_gre(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 		sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_GRE_NEEDS_FRAGMENTATION);
 		DEBUG_TRACE("Larger than MTU\n");
 		return 0;
+	}
+
+	/*
+	 * Set SKB packet type to PACKET_HOST
+	 */
+	if (unlikely(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PACKET_HOST)) {
+		skb->pkt_type = PACKET_HOST;
 	}
 
 	/*

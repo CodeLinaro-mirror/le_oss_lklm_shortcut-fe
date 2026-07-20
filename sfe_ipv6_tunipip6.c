@@ -2,7 +2,7 @@
  * sfe_ipv6_tunipip6.c
  *	Shortcut forwarding engine file for IPv6 TUNIPIP6
  *
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidaries.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: ISC
  */
 
@@ -57,10 +57,10 @@ int sfe_ipv6_recv_tunipip6(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_
 #ifdef CONFIG_NF_FLOW_COOKIE
 	cm = si->sfe_flow_cookie_table[skb->flow_cookie & SFE_FLOW_COOKIE_MASK].match;
 	if (unlikely(!cm)) {
-		cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_IPIP, src_ip, src_port, dest_ip, dest_port);
+		cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_IPIP, src_ip, src_port, dest_ip, dest_port);
 	}
 #else
-	cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_IPIP, src_ip, src_port, dest_ip, dest_port);
+	cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_IPIP, src_ip, src_port, dest_ip, dest_port);
 #endif
 	if (unlikely(!cm)) {
 		rcu_read_unlock();

@@ -3,7 +3,7 @@
  *	Shortcut forwarding engine file for IPv6 ICMP
  *
  * Copyright (c) 2015-2016, 2019-2020, The Linux Foundation. All rights reserved.
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidaries.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: ISC
  */
 
@@ -32,7 +32,7 @@
  * within Linux has all of the correct state should it need it.
  */
 int sfe_ipv6_recv_icmp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_device *dev,
-			      unsigned int len, struct ipv6hdr *iph, unsigned int ihl)
+			      unsigned int len, struct ipv6hdr *iph, unsigned int ihl, struct sfe_l2_info *l2_info)
 {
 	struct icmp6hdr *icmph;
 	struct ipv6hdr *icmp_iph;
@@ -168,7 +168,7 @@ int sfe_ipv6_recv_icmp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devi
 	 * been sent on the interface from which we received it though so that's still
 	 * ok to use.
 	 */
-	cm = sfe_ipv6_find_connection_match_rcu(si, dev, icmp_iph->nexthdr, dest_ip, dest_port, src_ip, src_port);
+	cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, icmp_iph->nexthdr, dest_ip, dest_port, src_ip, src_port);
 	if (unlikely(!cm)) {
 		rcu_read_unlock();
 		sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_ICMP_NO_CONNECTION);

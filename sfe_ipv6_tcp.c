@@ -166,10 +166,10 @@ int sfe_ipv6_recv_tcp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 #ifdef CONFIG_NF_FLOW_COOKIE
 	cm = si->sfe_flow_cookie_table[skb->flow_cookie & SFE_FLOW_COOKIE_MASK].match;
 	if (unlikely(!cm)) {
-		cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
+		cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
 	}
 #else
-	cm = sfe_ipv6_find_connection_match_rcu(si, dev, IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
+	cm = sfe_ipv6_find_connection_match_rcu(si, dev, l2_info, IPPROTO_TCP, src_ip, src_port, dest_ip, dest_port);
 #endif
 	if (unlikely(!cm)) {
 		/*
@@ -270,17 +270,15 @@ int sfe_ipv6_recv_tcp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 		return 0;
 	}
 
-#ifdef CONFIG_XFRM
 	/*
 	 * We can't accelerate the flow on this direction, just let it go
 	 * through the slow path.
 	 */
 	if (unlikely(!cm->flow_accel)) {
 		rcu_read_unlock();
-		this_cpu_inc(si->stats_pcpu->packets_not_forwarded64);
+		sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_FLOW_DIR_NOT_ACCEL);
 		return 0;
 	}
-#endif
 
 	/*
 	 * Do we expect an ingress VLAN tag for this flow?
@@ -777,7 +775,18 @@ int sfe_ipv6_recv_tcp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	 */
 	if (likely(hw_csum)) {
 		skb->ip_summed = CHECKSUM_PARTIAL;
+	} else {
+		/*
+		 * Received GRO packet and tx csum is not enabled.
+		 * In such a case, ip_summed is set to CHECKSUM_PARTIAL
+		 * at this point; hence clear ip_summed so that csum
+		 * can be calculated by software.
+		 */
+		if (likely(skb_is_gso(skb))) {
+			skb->ip_summed = CHECKSUM_NONE;
+		}
 	}
+
 	/*
 	 * Update traffic stats.
 	 */
