@@ -2,19 +2,8 @@
  * sfe_init.c
  *	Shortcut forwarding engine initialization.
  *
- * Copyright (c) 2021 Qualcomm Innovation Center, Inc. All rights reserved.
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * SPDX-License-Identifier: ISC
  */
 
 #include <linux/sysfs.h>
@@ -30,11 +19,11 @@
 #include "sfe_ipv6.h"
 
 int max_ipv4_conn = SFE_MAX_CONNECTION_NUM;
-module_param(max_ipv4_conn, int, S_IRUGO);
+module_param(max_ipv4_conn, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(max_ipv4_conn, "Max number of IPv4 connections");
 
 int max_ipv6_conn = SFE_MAX_CONNECTION_NUM;
-module_param(max_ipv6_conn, int, S_IRUGO);
+module_param(max_ipv6_conn, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(max_ipv6_conn, "Max number of IPv6 connections");
 
 int sixth_tuple_enable;
