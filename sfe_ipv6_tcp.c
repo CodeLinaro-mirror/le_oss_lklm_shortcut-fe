@@ -132,8 +132,8 @@ int sfe_ipv6_recv_tcp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 #ifdef SFE_SW_L4_CHECKSUM_VERIFICATION
 	struct net *net;
 #endif
-	struct netdev_hw_offload_ops *offload_ops = NULL;
-	bool tun_vp_tx = false;
+	struct net_device *offload_xmit_dev = NULL;
+	u64 __percpu *offload_stat = NULL;
 
 	/*
 	 * Is our packet too short to contain a valid TCP header?
@@ -286,15 +286,17 @@ int sfe_ipv6_recv_tcp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 #ifdef SFE_BRIDGE_VLAN_FILTERING_ENABLE
 	ingress_flags = cm->vlan_filter_rule.ingress_flags;
 #endif
-	if (unlikely(!sfe_vlan_validate_ingress_tag(skb, cm->ingress_vlan_hdr_cnt, cm->ingress_vlan_hdr, l2_info, ingress_flags))) {
-		if (!(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_BRIDGE_VLAN_PASSTHROUGH)) {
-			rcu_read_unlock();
-			sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_INGRESS_VLAN_TAG_MISMATCH);
-			DEBUG_TRACE("VLAN tag mismatch. skb=%px\n", skb);
-			return 0;
+	if (likely(!(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_VLAN_INGRESS_AGNOSTIC))) {
+		if (unlikely(!sfe_vlan_validate_ingress_tag(skb, cm->ingress_vlan_hdr_cnt, cm->ingress_vlan_hdr, l2_info, ingress_flags))) {
+			if (!(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_BRIDGE_VLAN_PASSTHROUGH)) {
+				rcu_read_unlock();
+				sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_INGRESS_VLAN_TAG_MISMATCH);
+				DEBUG_TRACE("VLAN tag mismatch. skb=%px\n", skb);
+				return 0;
+			}
+			vlan_passthrough = true;
+			this_cpu_inc(si->stats_pcpu->bridge_vlan_passthrough_forwarded64);
 		}
-		vlan_passthrough = true;
-		this_cpu_inc(si->stats_pcpu->bridge_vlan_passthrough_forwarded64);
 	}
 
 	/*
@@ -904,27 +906,44 @@ int sfe_ipv6_recv_tcp(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	features = cm->features;
 
 	fast_xmit = !!(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_FAST_XMIT);
-	tun_vp_tx = !!(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID);
+
+	if (unlikely(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID)) {
+		offload_xmit_dev = xmit_dev;
+		offload_stat = &si->stats_pcpu->ppe_tun_vp_tx64;
+	}
+#ifdef CONFIG_IPQ_PON
+	else if (unlikely(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_VEIP_PON_VP_VALID)) {
+		offload_xmit_dev = cm->offload_xmit_dev;
+		offload_stat = &si->stats_pcpu->ppe_veip_pon_vp_tx64;
+	}
+#endif
 
 	this_cpu_inc(si->stats_pcpu->packets_forwarded64);
 
 	/*
-	 * For tunnel Packets check if tunnel is active in PPE.
-	 * If tunnel is active queue the packet to tunnel VP.
+	 * For tunnel packets, queue the packet to the tunnel VP when the tunnel
+	 * is active in PPE. For VEIP packets, queue the packet to the VEIP PON
+	 * VP using the resolved offload handoff device.
 	 */
-	if (unlikely(tun_vp_tx)) {
-		offload_ops = rcu_dereference(xmit_dev->offload_ops);
-		if (likely(offload_ops && offload_ops->xmit)) {
-			mem_debug_update_skb(skb);
-			if (likely(offload_ops->xmit(xmit_dev, skb))) {
-				this_cpu_inc(si->stats_pcpu->ppe_tun_vp_tx64);
-				rcu_read_unlock();
-				return 1;
-			}
+	if (unlikely(offload_xmit_dev)) {
+		struct netdev_hw_offload_ops *offload_ops = rcu_dereference(offload_xmit_dev->offload_ops);
+		mem_debug_update_skb(skb);
+		if (likely(offload_ops && offload_ops->xmit && offload_ops->xmit(offload_xmit_dev, skb))) {
+			this_cpu_inc(*offload_stat);
+			rcu_read_unlock();
+			return 1;
 		}
 	}
 
 	rcu_read_unlock();
+
+#ifdef CONFIG_IPQ_PON
+	/*
+	 * A GEM-tagged skb is not allowed to take the fast xmit path, so drop
+	 * only the GEM extension here.
+	 */
+	skb_ext_del(skb, SKB_EXT_GEM);
+#endif
 
 	/*
 	 * We do per packet condition check before we could fast xmit the

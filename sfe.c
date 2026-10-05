@@ -47,6 +47,7 @@ uint8_t sfe_fls_flush_on_hwm_enable;
 #define sfe_ipv4_stopped(CTX) (rcu_dereference((CTX)->ipv4_stats_sync_cb) == NULL)
 #define sfe_ipv6_stopped(CTX) (rcu_dereference((CTX)->ipv6_stats_sync_cb) == NULL)
 #define SFE_IPSEC_TUNNEL_TYPE 31
+#define SFE_RFS_MCAST_RET_INTF_INVALID -1
 
 typedef enum sfe_exception {
 	SFE_EXCEPTION_IPV4_MSG_UNKNOWN,
@@ -114,6 +115,7 @@ struct sfe_ctx_instance_internal {
 	spinlock_t lock;		/* Lock to protect message queue */
 
 	struct work_struct work;	/* Work to send response message back to caller*/
+	unsigned int work_cpu;		/* The core to run response message processing on */
 
 	sfe_ipv4_msg_callback_t __rcu ipv4_stats_sync_cb;	/* Callback to call to sync ipv4 statistics */
 	sfe_ipv4_msg_callback_t __rcu ipv4_stats_sync_many_cb;	/* Callback to call to sync many ipv4 statistics */
@@ -475,7 +477,7 @@ static void sfe_process_response_msg(struct work_struct *work)
 	 * If having more msg in the queue, schedule it again.
 	 */
 	if (response) {
-		schedule_work(&sfe_ctx->work);
+		schedule_work_on(sfe_ctx->work_cpu, &sfe_ctx->work);
 	}
 }
 
@@ -574,7 +576,7 @@ static inline void sfe_enqueue_msg(struct sfe_ctx_instance_internal *sfe_ctx, st
 	list_add_tail(&response->node, &sfe_ctx->msg_queue);
 	spin_unlock_bh(&sfe_ctx->lock);
 
-	schedule_work(&sfe_ctx->work);
+	schedule_work_on(sfe_ctx->work_cpu, &sfe_ctx->work);
 }
 
 /*
@@ -880,6 +882,67 @@ ssize_t sfe_set_ppe_rfs_feature(struct device *dev, struct device_attribute *att
 }
 #endif
 
+#if defined(SFE_ESP_SPI_PASSTH_ENABLE)
+/*
+ * sfe_get_esp_spi_passthrough_feature()
+ *	SFE ESP SPI based passthrough is enabled or not.
+ */
+ssize_t sfe_get_esp_spi_passthrough_feature(struct device *dev,
+				     struct device_attribute *attr,
+				     char *buf)
+{
+	struct sfe_ctx_instance_internal *sfe_ctx = &__sfe_ctx;
+	ssize_t len;
+
+	spin_lock_bh(&sfe_ctx->lock);
+	len = snprintf(buf, (ssize_t)(PAGE_SIZE), "SFE ESP SPI based passthrough is %s\n", sfe_ctx->spi_esp_passthrough_support ? "enabled" : "disabled");
+	spin_unlock_bh(&sfe_ctx->lock);
+	return len;
+}
+
+/*
+ * sfe_set_esp_spi_passthrough_feature()
+ *	Enable or disable ESP SPI based passthrough features flag.
+ */
+ssize_t sfe_set_esp_spi_passthrough_feature(struct device *dev, struct device_attribute *attr,
+                         const char *buf, size_t count)
+{
+	unsigned long val;
+	struct sfe_ctx_instance_internal *sfe_ctx = &__sfe_ctx;
+	int ret;
+	ret = sscanf(buf, "%lu", &val);
+
+	if (ret != 1) {
+		pr_err("Wrong input, %s\n", buf);
+		return -EINVAL;
+	}
+
+	if (val != 1 && val != 0) {
+		pr_err("Input should be either 1 or 0, (%s)\n", buf);
+		return -EINVAL;
+	}
+
+	spin_lock_bh(&sfe_ctx->lock);
+
+	if (sfe_ctx->spi_esp_passthrough_support && val) {
+		spin_unlock_bh(&sfe_ctx->lock);
+		pr_err("ESP SPI based passthrough feature is already enabled\n");
+		return -EINVAL;
+	}
+
+	if (!sfe_ctx->spi_esp_passthrough_support && !val) {
+		spin_unlock_bh(&sfe_ctx->lock);
+		pr_err("ESP SPI based passthrough feature is already disabled\n");
+		return -EINVAL;
+	}
+
+	sfe_ctx->spi_esp_passthrough_support = val;
+	spin_unlock_bh(&sfe_ctx->lock);
+
+	return count;
+}
+#endif
+
 /*
  * sfe_recv_parse_l2()
  *	Parse L2 headers
@@ -974,6 +1037,10 @@ static void sfe_create_ipv4_ppe_rfs_rule(struct sfe_ipv4_connection_match *match
 		pr4rc.rule_flags |= PPE_RFS_V4_RULE_FLAG_BRIDGE_FLOW;
 	}
 
+	if (match_dir->is_mcast_flow) {
+		pr4rc.rule_flags |= PPE_RFS_V4_RULE_FLAG_MCAST_FLOW;
+	}
+
 	pr4rc.rule_flags |= PPE_RFS_V4_RULE_FLAG_FLOW_VALID | PPE_RFS_V4_RULE_FLAG_PASSIVE_FLOW;
 	pr4rc.tuple.protocol = match_dir->match_protocol;
 	pr4rc.tuple.flow_ip =  ntohl(match_dir->match_src_ip);
@@ -986,9 +1053,13 @@ static void sfe_create_ipv4_ppe_rfs_rule(struct sfe_ipv4_connection_match *match
 	pr4rc.conn_rule.return_ip_xlate = ntohl(match_dir->xlate_dest_ip);
 	pr4rc.conn_rule.return_ident_xlate = ntohs(match_dir->xlate_src_ip);
 	pr4rc.conn_rule.flow_interface_num = match_dir->flow_interface_num;
-	pr4rc.conn_rule.return_interface_num = match_dir->return_interface_num;
 	pr4rc.conn_rule.flow_top_interface_num = match_dir->flow_top_interface_num;
-	pr4rc.conn_rule.return_top_interface_num = match_dir->return_top_interface_num;
+
+	if (!match_dir->is_mcast_flow) {
+		pr4rc.conn_rule.return_interface_num = match_dir->return_interface_num;
+		pr4rc.conn_rule.return_top_interface_num = match_dir->return_top_interface_num;
+	}
+
 	pr4rc.conn_rule.flow_mtu = match_dir->flow_mtu;
 	pr4rc.conn_rule.return_mtu = match_dir->return_mtu;
 
@@ -1104,8 +1175,8 @@ static enum sfe_cmn_response sfe_create_ipv4_mc_rule_msg(struct sfe_ctx_instance
 #if defined(SFE_RFS_SUPPORTED)
                 struct sfe_ipv4_connection *conn;
                 struct sfe_ipv4_connection_match *flow_match;
-		s32 flow_interface_num = msg->msg.rule_create.conn_rule.flow_interface_num;
-		s32 return_interface_num = msg->msg.rule_create.conn_rule.return_interface_num;
+		s32 flow_interface_num = msg->msg.mc_rule_create.conn_rule.flow_interface_num;
+		s32 return_interface_num = SFE_RFS_MCAST_RET_INTF_INVALID;
 		u32 return_qos_tag = 0;
 		bool is_mcast = true;
 
@@ -1118,6 +1189,7 @@ static enum sfe_cmn_response sfe_create_ipv4_mc_rule_msg(struct sfe_ctx_instance
 		if (sfe_is_ppe_rfs_feature_enabled()) {
 			if (ppe_rfs_rule_eligible_get(flow_interface_num, return_interface_num,
 												is_mcast, flow_match->rfs_valid_flags)) {
+				flow_match->is_mcast_flow = is_mcast;
 				sfe_create_ipv4_ppe_rfs_rule(flow_match, return_qos_tag);
 			} else {
 				DEBUG_TRACE("%p: SFE mcast flow is not RFS eligible (false), flow interface num %d, return interface num %d. \n",
@@ -1277,6 +1349,7 @@ static enum sfe_cmn_response sfe_create_ipv4_rule_msg(struct sfe_ctx_instance_in
 			 */
 			if (ppe_rfs_rule_eligible_get(flow_interface_num, return_interface_num,
 											is_mcast, flow_match->rfs_valid_flags)) {
+				flow_match->is_mcast_flow = is_mcast;
 				sfe_create_ipv4_ppe_rfs_rule(flow_match, return_match->priority);
 			} else {
 				DEBUG_TRACE("%p: SFE forward flow is not RFS eligible (false), flow interface num %d, return interface num %d. \n",
@@ -1285,6 +1358,7 @@ static enum sfe_cmn_response sfe_create_ipv4_rule_msg(struct sfe_ctx_instance_in
 
 			if (ppe_rfs_rule_eligible_get(return_interface_num, flow_interface_num,
 											is_mcast, return_match->rfs_valid_flags)) {
+				return_match->is_mcast_flow = is_mcast;
 				sfe_create_ipv4_ppe_rfs_rule(return_match, flow_match->priority);
 			} else {
 				DEBUG_TRACE("%p: SFE return flow is not RFS eligible (false), flow interface num %d, return interface num %d. \n",
@@ -1718,6 +1792,10 @@ static void sfe_create_ipv6_ppe_rfs_rule(struct sfe_ipv6_connection_match *match
 		pr6rc.rule_flags |= PPE_RFS_V6_RULE_FLAG_BRIDGE_FLOW;
 	}
 
+	if (match_dir->is_mcast_flow) {
+		pr6rc.rule_flags |= PPE_RFS_V6_RULE_FLAG_MCAST_FLOW;
+	}
+
 	pr6rc.rule_flags |= PPE_RFS_V6_RULE_FLAG_FLOW_VALID | PPE_RFS_V6_RULE_FLAG_PASSIVE_FLOW;
 	pr6rc.tuple.protocol = match_dir->match_protocol;
 	pr6rc.tuple.flow_ip[0] = ntohl(match_dir->match_src_ip[0].addr[3]);
@@ -1732,9 +1810,13 @@ static void sfe_create_ipv6_ppe_rfs_rule(struct sfe_ipv6_connection_match *match
 	pr6rc.tuple.return_ident = ntohs(match_dir->match_dest_port);
 	pr6rc.tuple.flow_rule_id = match_dir->connection->flow_rule_id;
 	pr6rc.conn_rule.flow_interface_num = match_dir->flow_interface_num;
-	pr6rc.conn_rule.return_interface_num = match_dir->return_interface_num;
 	pr6rc.conn_rule.flow_top_interface_num = match_dir->flow_top_interface_num;
-	pr6rc.conn_rule.return_top_interface_num = match_dir->return_top_interface_num;
+
+	if (!match_dir->is_mcast_flow) {
+		pr6rc.conn_rule.return_interface_num = match_dir->return_interface_num;
+		pr6rc.conn_rule.return_top_interface_num = match_dir->return_top_interface_num;
+	}
+
 	pr6rc.conn_rule.flow_mtu = match_dir->flow_mtu;
 	pr6rc.conn_rule.return_mtu = match_dir->return_mtu;
 
@@ -1858,8 +1940,8 @@ static enum sfe_cmn_response sfe_create_ipv6_mc_rule_msg(struct sfe_ctx_instance
 #if defined(SFE_RFS_SUPPORTED)
                 struct sfe_ipv6_connection *conn;
                 struct sfe_ipv6_connection_match *flow_match;
-		s32 flow_interface_num = msg->msg.rule_create.conn_rule.flow_interface_num;
-		s32 return_interface_num = msg->msg.rule_create.conn_rule.return_interface_num;
+		s32 flow_interface_num = msg->msg.mc_rule_create.conn_rule.flow_interface_num;
+		s32 return_interface_num = SFE_RFS_MCAST_RET_INTF_INVALID;
 		u32 return_qos_tag = 0;
 		bool is_mcast = true;
 
@@ -1872,6 +1954,7 @@ static enum sfe_cmn_response sfe_create_ipv6_mc_rule_msg(struct sfe_ctx_instance
 		if (sfe_is_ppe_rfs_feature_enabled()) {
 			if (ppe_rfs_rule_eligible_get(flow_interface_num, return_interface_num,
 											is_mcast, flow_match->rfs_valid_flags)) {
+				flow_match->is_mcast_flow = is_mcast;
 				sfe_create_ipv6_ppe_rfs_rule(flow_match, return_qos_tag);
 			} else {
 				DEBUG_TRACE("%p: SFE mcast flow is not RFS eligible (false), flow interface num %d, return interface num %d. \n",
@@ -2074,6 +2157,7 @@ static enum sfe_cmn_response sfe_create_ipv6_rule_msg(struct sfe_ctx_instance_in
 			 */
 			if (ppe_rfs_rule_eligible_get(flow_interface_num, return_interface_num,
 											is_mcast, flow_match->rfs_valid_flags)) {
+				flow_match->is_mcast_flow = is_mcast;
 				sfe_create_ipv6_ppe_rfs_rule(flow_match, return_match->priority);
 			} else {
 				DEBUG_TRACE("%p: SFE forward flow is not RFS eligible (false), flow interface num %d, return interface num %d. \n",
@@ -2082,6 +2166,7 @@ static enum sfe_cmn_response sfe_create_ipv6_rule_msg(struct sfe_ctx_instance_in
 
 			if (ppe_rfs_rule_eligible_get(return_interface_num, flow_interface_num,
 											is_mcast, return_match->rfs_valid_flags)) {
+				return_match->is_mcast_flow = is_mcast;
 				sfe_create_ipv6_ppe_rfs_rule(return_match, flow_match->priority);
 			} else {
 				DEBUG_TRACE("%p: SFE return flow is not RFS eligible (false), flow interface num %d, return interface num %d. \n",
@@ -3183,6 +3268,12 @@ int sfe_init_if(void)
 
 	INIT_LIST_HEAD(&sfe_ctx->msg_queue);
 	INIT_WORK(&sfe_ctx->work, sfe_process_response_msg);
+
+	/*
+	 * Pin response processing to a fixed core so it isn't starved by
+	 * contention on whichever CPU the generic system_wq happens to pick.
+	 */
+	sfe_ctx->work_cpu = NR_CPUS - 1;
 
 	/*
 	 * Hook the receive path in the network stack.
