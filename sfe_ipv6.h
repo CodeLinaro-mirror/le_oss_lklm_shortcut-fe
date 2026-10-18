@@ -123,6 +123,10 @@ struct sfe_ipv6_vlan_filter_connection_match {
 					/* VXLAN-GPE flow */
 #define SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID (1<<28)
 					/* TUN VP valid */
+#define SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_VEIP_PON_VP_VALID (1<<29)
+					/* VEIP PON VP valid */
+#define SFE_IPV6_CONNECTION_MATCH_FLAG_VLAN_INGRESS_AGNOSTIC (1<<30)
+					/* Ignore ingress VLAN tag(s); apply only the configured egress VLAN tag(s) */
 /*
  * IPv6 multicast destination structure
  */
@@ -175,6 +179,10 @@ struct sfe_ipv6_connection_match {
 	 * Packet transmit information.
 	 */
 	struct net_device *xmit_dev;	/* Network device on which to transmit */
+#ifdef CONFIG_IPQ_PON
+	struct net_device *offload_xmit_dev;
+					/* Device used for PPE offload xmit handoff */
+#endif
 	struct net_device *qdisc_xmit_dev;      /* Interface used for fast qdisc xmit */
 
 	/*
@@ -299,7 +307,7 @@ struct sfe_ipv6_connection_match {
 	s32 flow_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
 	s32 return_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
 	s32 return_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
-
+	bool is_mcast_flow;		/* The flow is multicast or not */
 #endif
 	bool flow_accel;		/* The flow accelerated or not */
 };
@@ -341,8 +349,23 @@ struct sfe_ipv6_connection {
 
 /*
  * IPv6 connections and hash table size information.
+ * SFE_IPV6_CONNECTION_HASH_SHIFT is log2(SFE_MAX_CONNECTION_NUM), determined
+ * at compile time via preprocessor if-checks to avoid any runtime cost.
+ * SFE_MAX_CONNECTION_NUM must be a power of 2 between 512 and 8192.
  */
+#if (SFE_MAX_CONNECTION_NUM == 512)
+#define SFE_IPV6_CONNECTION_HASH_SHIFT 9
+#elif (SFE_MAX_CONNECTION_NUM == 1024)
+#define SFE_IPV6_CONNECTION_HASH_SHIFT 10
+#elif (SFE_MAX_CONNECTION_NUM == 2048)
+#define SFE_IPV6_CONNECTION_HASH_SHIFT 11
+#elif (SFE_MAX_CONNECTION_NUM == 4096)
 #define SFE_IPV6_CONNECTION_HASH_SHIFT 12
+#elif (SFE_MAX_CONNECTION_NUM == 8192)
+#define SFE_IPV6_CONNECTION_HASH_SHIFT 13
+#else
+#error "SFE_MAX_CONNECTION_NUM must be a power of 2 between 512 and 8192"
+#endif
 #define SFE_IPV6_CONNECTION_HASH_SIZE (1 << SFE_IPV6_CONNECTION_HASH_SHIFT)
 #define SFE_IPV6_CONNECTION_HASH_MASK (SFE_IPV6_CONNECTION_HASH_SIZE - 1)
 
@@ -427,6 +450,7 @@ enum sfe_ipv6_exception_events {
 	SFE_IPV6_EXCEPTION_EVENT_VXLAN_GPE_NO_ROUTE,
 	SFE_IPV6_EXCEPTION_EVENT_VXLAN_GPE_DST_ERROR,
 	SFE_IPV6_EXCEPTION_EVENT_FLOW_DIR_NOT_ACCEL,
+	SFE_IPV6_EXCEPTION_EVENT_FLS_CREATE_FAILED,
 	SFE_IPV6_EXCEPTION_EVENT_LAST
 };
 
@@ -472,6 +496,9 @@ struct sfe_ipv6_stats {
 	u64 fragment_forwarded64;	/*Number of fragments forwarded. */
 	u64 fragment_dropped64;		/*Number of fragments dropped. */
 	u64 fragment_id_timeout64;	/*Number of fragment id timeouts. */
+#ifdef CONFIG_IPQ_PON
+	u64 ppe_veip_pon_vp_tx64;	/* Number of IPv6 packets queued to PPE VEIP GW VP */
+#endif
 	u64 fragment_exception64;	/*Number of fragment exception to host. */
 	u64 bridge_vlan_passthrough_forwarded64;	/* Number of IPV6 bridge vlan passthrough packets forwarded */
 	u64 ppe_tun_vp_tx64;				/* Number of IPV6 packets queued to PPE tunnel VP  */

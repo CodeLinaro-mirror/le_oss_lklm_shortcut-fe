@@ -35,6 +35,8 @@ int sfe_ipv6_recv_gre(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	struct sfe_ipv6_addr *dest_ip;
 	struct sfe_ipv6_addr *src_ip;
 	struct net_device *xmit_dev;
+	struct net_device *offload_xmit_dev = NULL;
+	u64 __percpu *offload_stat = NULL;
 	bool bridge_flow;
 	bool passthrough;
 	bool ret;
@@ -260,6 +262,20 @@ int sfe_ipv6_recv_gre(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	}
 
 	/*
+	 * Check if TX dev is tun vp.
+	 */
+	if (unlikely(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID)) {
+		offload_xmit_dev = cm->xmit_dev;
+		offload_stat = &si->stats_pcpu->ppe_tun_vp_tx64;
+	}
+#ifdef CONFIG_IPQ_PON
+	else if (unlikely(cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_VEIP_PON_VP_VALID)) {
+		offload_xmit_dev = cm->offload_xmit_dev;
+		offload_stat = &si->stats_pcpu->ppe_veip_pon_vp_tx64;
+	}
+#endif
+
+	/*
 	 * Check if skb has enough headroom to write L2 headers
 	 */
 	if (unlikely(skb_headroom(skb) < cm->l2_hdr_size)) {
@@ -357,9 +373,23 @@ int sfe_ipv6_recv_gre(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 		skb->mark = cm->mark;
 	}
 
-	rcu_read_unlock();
-
 	this_cpu_inc(si->stats_pcpu->packets_forwarded64);
+
+	/*
+	 * For tunnel Packets check if tunnel is active in PPE.
+	 * If tunnel is active queue the packet to tunnel VP.
+	 */
+	if (unlikely(offload_xmit_dev)) {
+		struct netdev_hw_offload_ops *offload_ops = rcu_dereference(offload_xmit_dev->offload_ops);
+		mem_debug_update_skb(skb);
+		if (likely(offload_ops && offload_ops->xmit && offload_ops->xmit(offload_xmit_dev, skb))) {
+			this_cpu_inc(*offload_stat);
+			rcu_read_unlock();
+			return 1;
+		}
+	}
+
+	rcu_read_unlock();
 
 	/*
 	 * We're going to check for GSO flags when we transmit the packet so
@@ -376,6 +406,7 @@ int sfe_ipv6_recv_gre(struct sfe_ipv6 *si, struct sk_buff *skb, struct net_devic
 	 * Send the packet on its way.
 	 */
 	mem_debug_update_skb(skb);
+
 	dev_queue_xmit(skb);
 
 	return 1;

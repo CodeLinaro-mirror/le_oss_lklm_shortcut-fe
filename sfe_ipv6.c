@@ -129,7 +129,8 @@ static char *sfe_ipv6_exception_events_string[SFE_IPV6_EXCEPTION_EVENT_LAST] = {
 	"TCP_CHECKSUM_ERROR",
 	"VXLAN_GPE_NO_ROUTE",
 	"VXLAN_GPE_DST_ERROR",
-	"FLOW_DIR_NOT_ACCEL"
+	"FLOW_DIR_NOT_ACCEL",
+	"FLS_CREATE_FAILED"
 };
 
 static struct sfe_ipv6 __si6;
@@ -487,6 +488,9 @@ static void sfe_ipv6_update_summary_stats(struct sfe_ipv6 *si, struct sfe_ipv6_s
 		stats->fragment_exception64 += s->fragment_exception64;
 		stats->bridge_vlan_passthrough_forwarded64 += s->bridge_vlan_passthrough_forwarded64;
 		stats->ppe_tun_vp_tx64 += s->ppe_tun_vp_tx64;
+#ifdef CONFIG_IPQ_PON
+		stats->ppe_veip_pon_vp_tx64 += s->ppe_veip_pon_vp_tx64;
+#endif
 	}
 }
 
@@ -722,6 +726,12 @@ bool sfe_ipv6_remove_connection(struct sfe_ipv6 *si, struct sfe_ipv6_connection 
 			dev_put(c->reply_match->xmit_dev);
 		}
 
+#ifdef CONFIG_IPQ_PON
+		if (c->reply_match->offload_xmit_dev) {
+			dev_put(c->reply_match->offload_xmit_dev);
+		}
+#endif
+
 		sfe_ipv6_remove_connection_match(si, c->reply_match);
 	}
 
@@ -735,6 +745,12 @@ bool sfe_ipv6_remove_connection(struct sfe_ipv6 *si, struct sfe_ipv6_connection 
 	if (c->original_match->qdisc_xmit_dev) {
 		dev_put(c->original_match->xmit_dev);
 	}
+
+#ifdef CONFIG_IPQ_PON
+	if (c->original_match->offload_xmit_dev) {
+		dev_put(c->original_match->offload_xmit_dev);
+	}
+#endif
 
 	sfe_ipv6_remove_connection_match(si, c->original_match);
 
@@ -970,6 +986,57 @@ void sfe_ipv6_fls_clear(void)
 	}
 	rcu_read_unlock();
 }
+
+/*
+ * sfe_ipv6_fls_enable()
+ *	Re-enable FLS stats for the connection match(es) with this 5-tuple.
+ */
+bool sfe_ipv6_fls_enable(uint8_t protocol, __be32 *src_ip, __be16 src_port,
+			  __be32 *dest_ip, __be16 dest_port)
+{
+	struct sfe_ipv6 *si6 = &__si6;
+	struct sfe_ipv6_addr *src_addr = (struct sfe_ipv6_addr *)src_ip;
+	struct sfe_ipv6_addr *dest_addr = (struct sfe_ipv6_addr *)dest_ip;
+	struct sfe_ipv6_connection_match *cm;
+	bool found = false;
+	uint32_t i;
+
+	/*
+	 * The FLS connection tuple stores the translated (xlate) destination
+	 * rather than the pre-NAT match destination (see create_cb usage in
+	 * sfe_ipv6_create_rule()), so the destination side of this tuple may be
+	 * either representation depending on whether NAT is in play. That means
+	 * the hash bucket used at connection-match insertion time (which is keyed
+	 * off match_dest_ip/port) cannot be reliably recomputed from the caller's
+	 * tuple, so we scan every bucket instead of hashing directly.
+	 */
+	rcu_read_lock();
+	for (i = 0; i < SFE_IPV6_CONNECTION_HASH_SIZE && !found; i++) {
+		hlist_for_each_entry_rcu(cm, &si6->hlist_conn_match_hash_head[i], hnode) {
+			if (cm->match_protocol != protocol ||
+			    !sfe_ipv6_addr_equal(cm->match_src_ip, src_addr) ||
+			    cm->match_src_port != src_port) {
+				continue;
+			}
+
+			if ((!sfe_ipv6_addr_equal(cm->match_dest_ip, dest_addr) || cm->match_dest_port != dest_port) &&
+			    (!sfe_ipv6_addr_equal(cm->xlate_dest_ip, dest_addr) || cm->xlate_dest_port != dest_port)) {
+				continue;
+			}
+
+			cm->flags &= ~SFE_IPV6_CONNECTION_MATCH_FLAG_FLS_DISABLED;
+			if (cm->counter_match) {
+				cm->counter_match->flags &= ~SFE_IPV6_CONNECTION_MATCH_FLAG_FLS_DISABLED;
+			}
+			found = true;
+			break;
+		}
+	}
+	rcu_read_unlock();
+
+	return found;
+}
+EXPORT_SYMBOL(sfe_ipv6_fls_enable);
 
 /*
  * sfe_ipv6_sync_status()
@@ -1478,6 +1545,7 @@ static void sfe_ipv6_unidir_rule_update(struct sfe_ipv6_connection *conn, struct
 	struct sfe_ipv6_connection_match *match_dir;
 	u32 qos_tag;
 	u8 int_pri, dscp;
+	u8 old_egress_vlan_hdr_cnt;
 	char direction[] = "reply";
 
 	if (update_msg->info.unidir.update_dir == SFE_FLOW_RULE_DIRECTION_FLOW) {
@@ -1492,8 +1560,6 @@ static void sfe_ipv6_unidir_rule_update(struct sfe_ipv6_connection *conn, struct
 		dscp = update_msg->info.unidir.dscp.return_dscp;
 	}
 
-	match_dir->flow_accel = true;
-
 	if (update_msg->flags & SFE_UPDATE_RULE_QOS_VALID) {
 		match_dir->priority = qos_tag;
 		match_dir->dscp = dscp << SFE_IPV6_DSCP_SHIFT;
@@ -1502,11 +1568,48 @@ static void sfe_ipv6_unidir_rule_update(struct sfe_ipv6_connection *conn, struct
 #endif
 	}
 
+	if (update_msg->flags & SFE_UPDATE_RULE_VLAN_INGRESS_AGNOSTIC) {
+		match_dir->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_VLAN_INGRESS_AGNOSTIC;
+		match_dir->flags &= ~SFE_IPV6_CONNECTION_MATCH_FLAG_BRIDGE_VLAN_PASSTHROUGH;
+	}
+
+	if (update_msg->flags & SFE_UPDATE_RULE_VLAN_VALID) {
+		old_egress_vlan_hdr_cnt = match_dir->egress_vlan_hdr_cnt;
+
+		match_dir->egress_vlan_hdr_cnt = 0;
+		memset(match_dir->egress_vlan_hdr, 0, sizeof(match_dir->egress_vlan_hdr));
+
+		sfe_ipv6_match_entry_set_vlan_hdr(&match_dir->egress_vlan_hdr_cnt, match_dir->egress_vlan_hdr,
+				update_msg->info.unidir.vlan_primary_rule.egress_vlan_tag,
+				update_msg->info.unidir.vlan_secondary_rule.egress_vlan_tag);
+
+		if (match_dir->egress_vlan_hdr_cnt) {
+			match_dir->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_INSERT_EGRESS_VLAN_TAG;
+		} else {
+			match_dir->flags &= ~SFE_IPV6_CONNECTION_MATCH_FLAG_INSERT_EGRESS_VLAN_TAG;
+		}
+
+		match_dir->l2_hdr_size -= old_egress_vlan_hdr_cnt * VLAN_HLEN;
+		match_dir->l2_hdr_size += match_dir->egress_vlan_hdr_cnt * VLAN_HLEN;
+	}
+
+	/*
+	 * Mark accel ready only after all the fields above have been updated,
+	 * so a concurrent reader never sees a partially-updated match entry.
+	 */
+	match_dir->flow_accel = true;
+
 	if (update_msg->info.unidir.update_dir == SFE_FLOW_RULE_DIRECTION_FLOW) {
 		snprintf(direction, sizeof(direction), "%s", "orig");
 	}
 
-	DEBUG_TRACE("%px: matched direction(%s) updated qos_tag:%x int_pri:%x\n", conn, direction, qos_tag, int_pri);
+	DEBUG_TRACE("%px: matched direction(%s) updated qos_tag:%x int_pri:%x vlan_ingress_agnostic:%d egress_vlan_hdr_cnt:%u egress_vlan_tag:%x,%x l2_hdr_size:%u\n",
+			conn, direction, qos_tag, int_pri,
+			!!(update_msg->flags & SFE_UPDATE_RULE_VLAN_INGRESS_AGNOSTIC),
+			match_dir->egress_vlan_hdr_cnt,
+			update_msg->info.unidir.vlan_primary_rule.egress_vlan_tag,
+			update_msg->info.unidir.vlan_secondary_rule.egress_vlan_tag,
+			match_dir->l2_hdr_size);
 }
 
 /*
@@ -2295,8 +2398,8 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	struct sock *sk;
 	struct net *net;
 	unsigned int src_if_idx;
-	void *orig_conn;
-	void *reply_conn;
+	void *orig_conn = NULL;
+	void *reply_conn = NULL;
 	sfe_fls_conn_create_t create_cb;
 
 	s32 flow_interface_num = msg->conn_rule.flow_top_interface_num;
@@ -2467,6 +2570,10 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 
 	original_cm->top_interface_dev = NULL;
 	reply_cm->top_interface_dev = NULL;
+#ifdef CONFIG_IPQ_PON
+	original_cm->offload_xmit_dev = NULL;
+	reply_cm->offload_xmit_dev = NULL;
+#endif
 
 #if defined(SFE_RFS_SUPPORTED)
 	original_cm->flow_mtu = msg->conn_rule.flow_mtu;
@@ -2536,6 +2643,9 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_BRIDGE_FLOW) {
 		original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_BRIDGE_FLOW;
 	}
+	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_FLOW_VLAN_INGRESS_AGNOSTIC) {
+		original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_VLAN_INGRESS_AGNOSTIC;
+	}
 	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_FLOW_TRANSMIT_FAST) {
 		original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_FAST_XMIT_DEV_ADMISSION;
 	}
@@ -2543,6 +2653,20 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_FLOW_DEST_TUN_VP) {
                original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID;
 	}
+
+#ifdef CONFIG_IPQ_PON
+	if ((msg->rule_flags & SFE_RULE_CREATE_FLAG_FLOW_DEST_VEIP_PON_VP) &&
+			!(original_cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_FAST_QDISC_XMIT)) {
+		original_cm->offload_xmit_dev = dev_get_by_index(&init_net,
+				msg->conn_rule.veip_xmit_interface_num);
+		if (unlikely(!original_cm->offload_xmit_dev)) {
+			status = SFE_RET_DEST_DEV_NOT_FOUND;
+			goto free_reply_cm;
+		}
+
+		original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_VEIP_PON_VP_VALID;
+	}
+#endif
 
 	/*
 	 * Mark SAWF metadata if the sawf tag is valid.
@@ -2820,6 +2944,13 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	}
 
 	/*
+	 * VLAN-ingress-agnostic and bridge-VLAN-passthrough are mutually exclusive.
+	 */
+	if (original_cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_VLAN_INGRESS_AGNOSTIC) {
+		original_cm->flags &= ~SFE_IPV6_CONNECTION_MATCH_FLAG_BRIDGE_VLAN_PASSTHROUGH;
+	}
+
+	/*
 	 * Fill in the "reply" direction connection matching object.
 	 */
 	reply_cm->match_dev = dest_dev;
@@ -2848,26 +2979,47 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	reply_cm->return_top_interface_num = msg->conn_rule.flow_top_interface_num;
 #endif
 
-	rcu_read_lock();
-	create_cb = rcu_dereference(sfe_fls_info.create_cb);
-	if (create_cb) {
-		create_cb(6, original_cm->match_protocol,
-					(uint32_t *)original_cm->match_src_ip,
-					original_cm->match_src_port,
-					(uint32_t *)original_cm->xlate_dest_ip,
-					original_cm->xlate_dest_port,
-					&orig_conn,
-					&reply_conn);
+	/*
+	 * If the flow is outer tunnel flow, skip FLS creation.
+	 */
+	if (msg->valid_flags & SFE_RULE_CREATE_TUNNEL_OUTER_FLOW_VALID) {
+		DEBUG_INFO("%px: Skip FLS rule creation for Outer Flow:%pI6, xlate_src_ip:%pI6, match_dest_ip:%pI6, xlate_dest_ip:%pI6\n",
+				msg, original_cm->match_src_ip,
+				original_cm->xlate_src_ip,
+				original_cm->match_dest_ip,
+				original_cm->xlate_dest_ip);
+	} else {
+		rcu_read_lock();
+		create_cb = rcu_dereference(sfe_fls_info.create_cb);
+		if (create_cb) {
+			create_cb(6, original_cm->match_protocol,
+						(uint32_t *)original_cm->match_src_ip,
+						original_cm->match_src_port,
+						(uint32_t *)original_cm->xlate_dest_ip,
+						original_cm->xlate_dest_port,
+						&orig_conn,
+						&reply_conn);
 
-		/*
-		 * TODO: Set FLS_DISABLED flag by default and unset when fls_conn is set.
-		 */
-		if (orig_conn && reply_conn) {
-			original_cm->fls_conn = orig_conn;
-			reply_cm->fls_conn = reply_conn;
+			/*
+			 * TODO: Set FLS_DISABLED flag by default and unset when fls_conn is set.
+			 */
+			if (orig_conn && reply_conn) {
+				DEBUG_INFO("%px: FLS Flow Created: match_src_ip:%pI6, xlate_src_ip:%pI6, match_dest_ip:%pI6, xlate_dest_ip:%pI6\n",
+						msg, original_cm->match_src_ip,
+						original_cm->xlate_src_ip,
+						original_cm->match_dest_ip,
+						original_cm->xlate_dest_ip);
+				original_cm->fls_conn = orig_conn;
+				reply_cm->fls_conn = reply_conn;
+			} else {
+				DEBUG_ERROR("%px: FLS creation failed for flow - p: %d, s: %pI6:%u, d: %pI6:%u, orig_conn:%px, reply_conn:%px\n",
+						msg, msg->tuple.protocol, msg->tuple.flow_ip, ntohs(msg->tuple.flow_ident), msg->tuple.return_ip, ntohs(msg->tuple.return_ident),
+						orig_conn, reply_conn);
+				sfe_ipv6_exception_stats_inc(si, SFE_IPV6_EXCEPTION_EVENT_FLS_CREATE_FAILED);
+			}
 		}
+		rcu_read_unlock();
 	}
-	rcu_read_unlock();
 
 	/*
 	 * Enable qdisc fast xmit path if single qdisc is present on non-bottom interface.
@@ -2934,6 +3086,9 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_BRIDGE_FLOW) {
 		reply_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_BRIDGE_FLOW;
 	}
+	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_RETURN_VLAN_INGRESS_AGNOSTIC) {
+		reply_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_VLAN_INGRESS_AGNOSTIC;
+	}
 	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_RETURN_TRANSMIT_FAST) {
 		reply_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_FAST_XMIT_DEV_ADMISSION;
 	}
@@ -2941,6 +3096,20 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 	if (msg->rule_flags & SFE_RULE_CREATE_FLAG_RETURN_DEST_TUN_VP) {
                reply_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID;
 	}
+
+#ifdef CONFIG_IPQ_PON
+	if ((msg->rule_flags & SFE_RULE_CREATE_FLAG_RETURN_DEST_VEIP_PON_VP) &&
+			!(reply_cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_FAST_QDISC_XMIT)) {
+		reply_cm->offload_xmit_dev = dev_get_by_index(&init_net,
+				msg->conn_rule.veip_xmit_interface_num);
+		if (unlikely(!reply_cm->offload_xmit_dev)) {
+			status = SFE_RET_DEST_DEV_NOT_FOUND;
+			goto free_reply_cm;
+		}
+
+		reply_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_PPE_VEIP_PON_VP_VALID;
+	}
+#endif
 
 	if (sfe_is_l2_feature_enabled() && !(msg->rule_flags & SFE_RULE_CREATE_FLAG_BRIDGE_FLOW)) {
 		original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_PACKET_HOST;
@@ -3384,6 +3553,10 @@ sfe_response_t sfe_ipv6_create_rule(struct sfe_ipv6_rule_create_msg *msg)
 		}
 	}
 
+	if (reply_cm->flags & SFE_IPV6_CONNECTION_MATCH_FLAG_VLAN_INGRESS_AGNOSTIC) {
+		reply_cm->flags &= ~SFE_IPV6_CONNECTION_MATCH_FLAG_BRIDGE_VLAN_PASSTHROUGH;
+	}
+
 	if ((!sfe_ipv6_addr_equal((struct sfe_ipv6_addr *)tuple->return_ip, (struct sfe_ipv6_addr *)msg->conn_rule.return_ip_xlate)) ||
 				(tuple->return_ident != msg->conn_rule.return_ident_xlate)) {
 		original_cm->flags |= SFE_IPV6_CONNECTION_MATCH_FLAG_XLATE_DEST;
@@ -3515,6 +3688,12 @@ free_reply_cm:
 		dev_put(reply_cm->top_interface_dev);
 	}
 
+#ifdef CONFIG_IPQ_PON
+	if (reply_cm->offload_xmit_dev) {
+		dev_put(reply_cm->offload_xmit_dev);
+	}
+#endif
+
 	kfree(reply_cm);
 
 free_original_cm:
@@ -3525,6 +3704,12 @@ free_original_cm:
 	if (original_cm->top_interface_dev) {
 		dev_put(original_cm->top_interface_dev);
 	}
+
+#ifdef CONFIG_IPQ_PON
+	if (original_cm->offload_xmit_dev) {
+		dev_put(original_cm->offload_xmit_dev);
+	}
+#endif
 
 	kfree(original_cm);
 
@@ -4317,7 +4502,11 @@ static int sfe_ipv6_debug_dev_read_stats(struct sfe_ipv6 *si, struct sfe_ipv6_de
 			      "fragment_id_timeout=\"%llu\" "
 			      "fragments_exception=\"%llu\" "
 			      "bridge_vlan_passthrough_forwarded64=\"%llu\" />\n"
-			      "ppe_tun_vp_tx64 =\"%llu\" />\n",
+			      "ppe_tun_vp_tx64 =\"%llu\" />\n"
+#ifdef CONFIG_IPQ_PON
+			      "ppe_veip_pon_vp_tx64 =\"%llu\" />\n"
+#endif
+			      ,
 				num_conn,
 				stats.packets_dropped64,
 				stats.packets_fast_xmited64,
@@ -4346,7 +4535,11 @@ static int sfe_ipv6_debug_dev_read_stats(struct sfe_ipv6 *si, struct sfe_ipv6_de
 				stats.fragment_id_timeout64,
 				stats.fragment_exception64,
 				stats.bridge_vlan_passthrough_forwarded64,
-				stats.ppe_tun_vp_tx64);
+				stats.ppe_tun_vp_tx64
+#ifdef CONFIG_IPQ_PON
+				, stats.ppe_veip_pon_vp_tx64
+#endif
+				);
 
 	ws->msgp = ws->msg;
 

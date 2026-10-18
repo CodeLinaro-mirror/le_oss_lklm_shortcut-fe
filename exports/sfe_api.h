@@ -106,6 +106,10 @@
 #define SFE_RULE_CREATE_FLAG_FLOW_DEST_TUN_VP	 (1<<21) 	/**< TUNNEL VP is destination interface flow direction*/
 #define SFE_RULE_CREATE_FLAG_RETURN_DEST_TUN_VP	 (1<<22) 	/**< TUNNEL VP is destination interface in return direction*/
 #define SFE_RULE_CREATE_FLAG_ESP_PASSTHROUGH (1<<23)		/**< IPSec Passthrough. */
+#define SFE_RULE_CREATE_FLAG_FLOW_DEST_VEIP_PON_VP (1<<24)	/**< VEIP PON VP is destination interface in flow direction. */
+#define SFE_RULE_CREATE_FLAG_RETURN_DEST_VEIP_PON_VP (1<<25)	/**< VEIP PON VP is destination interface in return direction. */
+#define SFE_RULE_CREATE_FLAG_FLOW_VLAN_INGRESS_AGNOSTIC (1<<26)	/**< Ignore ingress VLAN tag(s) and apply only the configured egress VLAN tag(s) in the flow direction. */
+#define SFE_RULE_CREATE_FLAG_RETURN_VLAN_INGRESS_AGNOSTIC (1<<27)	/**< Ignore ingress VLAN tag(s) and apply only the configured egress VLAN tag(s) in the return direction. */
 
 /*
  * Rule creation validity flags.
@@ -230,6 +234,10 @@
 		/**< QoS mark is set for this flow. */
 #define SFE_UPDATE_RULE_DSCP_VALID		(1<<4)
 		/**< DSCP values are valid in update rule. */
+#define SFE_UPDATE_RULE_VLAN_VALID		(1<<5)
+		/**< VLAN rules are valid in update rule. */
+#define SFE_UPDATE_RULE_VLAN_INGRESS_AGNOSTIC	(1<<6)
+		/**< Ignore ingress VLAN tag(s) and apply only the configured egress VLAN tag(s) in the selected direction. */
 
 /**
  * @}
@@ -359,6 +367,9 @@ struct sfe_ipv4_connection_rule {
 	s32 return_interface_num;	/**< Return interface number. */
 	s32 flow_top_interface_num;	/**< Top flow interface number. */
 	s32 return_top_interface_num;	/**< Top return interface number. */
+#ifdef CONFIG_IPQ_PON
+	s32 veip_xmit_interface_num;	/**< VEIP offload xmit interface number. */
+#endif
 	u32 flow_mtu;			/**< Flow interface`s MTU. */
 	u32 return_mtu;			/**< Return interface`s MTU. */
 	__be32 flow_ip_xlate;		/**< Translated flow IP address. */
@@ -528,6 +539,8 @@ struct sfe_update_msg_unidir_t {
 	struct sfe_qos_rule qos;		/**< QoS rule information. */
 	struct sfe_dscp_rule dscp;		/**< DSCP-related acceleration parameters. */
 	sfe_flow_rule_direction_t update_dir;	/**< Direction to update. */
+	struct sfe_vlan_rule vlan_primary_rule;	/**< Primary VLAN rule information. */
+	struct sfe_vlan_rule vlan_secondary_rule;	/**< Secondary VLAN rule information. */
 };
 
 /**
@@ -793,6 +806,9 @@ struct sfe_ipv6_connection_rule {
 	s32 return_interface_num;	/**< Return interface number. */
 	s32 flow_top_interface_num;	/**< Top flow interface number. */
 	s32 return_top_interface_num;	/**< Top return interface number. */
+#ifdef CONFIG_IPQ_PON
+	s32 veip_xmit_interface_num;	/**< VEIP offload xmit interface number. */
+#endif
 	u32 flow_mtu;			/**< Flow interface's MTU. */
 	u32 return_mtu;			/**< Return interface's MTU. */
 	__be32 flow_ip_xlate[4];		/**< Translated flow IP address. */
@@ -1306,6 +1322,36 @@ void sfe_fls_register(sfe_fls_conn_create_t create_cb, sfe_fls_conn_delete_t del
  * None.
  */
 void sfe_fls_unregister(void);
+
+/**
+ * Re-enables FLS stats for the IPv4 connection match(es) with this 5-tuple.
+ *
+ * @param	protocol	IP protocol.
+ * @param	src_ip		Source IP address.
+ * @param	src_port	Source port.
+ * @param	dest_ip		Destination IP address.
+ * @param	dest_port	Destination port.
+ *
+ * @return
+ * true if a matching connection was found and re-enabled.
+ */
+extern bool sfe_ipv4_fls_enable(uint8_t protocol, __be32 src_ip, __be16 src_port,
+				 __be32 dest_ip, __be16 dest_port);
+
+/**
+ * Re-enables FLS stats for the IPv6 connection match(es) with this 5-tuple.
+ *
+ * @param	protocol	IP protocol.
+ * @param	src_ip		Source IP address (4 x __be32 words).
+ * @param	src_port	Source port.
+ * @param	dest_ip		Destination IP address (4 x __be32 words).
+ * @param	dest_port	Destination port.
+ *
+ * @return
+ * true if a matching connection was found and re-enabled.
+ */
+extern bool sfe_ipv6_fls_enable(uint8_t protocol, __be32 *src_ip, __be16 src_port,
+				 __be32 *dest_ip, __be16 dest_port);
 
 /**
  * @}

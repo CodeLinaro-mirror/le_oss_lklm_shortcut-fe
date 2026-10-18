@@ -112,6 +112,10 @@ struct sfe_ipv4_vlan_filter_connection_match {
 					/* VXLAN-GPE flow */
 #define SFE_IPV4_CONNECTION_MATCH_FLAG_PPE_TUN_VP_VALID (1<<29)
 					/* TUN VP valid */
+#define SFE_IPV4_CONNECTION_MATCH_FLAG_PPE_VEIP_PON_VP_VALID (1<<30)
+					/* VEIP PON VP valid */
+#define SFE_IPV4_CONNECTION_MATCH_FLAG_VLAN_INGRESS_AGNOSTIC (1U<<31)
+					/* Ignore ingress VLAN tag(s); apply only the configured egress VLAN tag(s) */
 
 /*
  * IPv4 multicast destination structure
@@ -281,6 +285,9 @@ struct sfe_ipv4_connection_match {
 	struct list_head mc_list;
 
 	struct net_device *top_interface_dev;	/* Used by tun6rd to store decap VLAN netdevice.*/
+#ifdef CONFIG_IPQ_PON
+	struct net_device *offload_xmit_dev;	/* Device used for PPE offload xmit handoff. */
+#endif
 
 	void *fls_conn;
 
@@ -296,7 +303,7 @@ struct sfe_ipv4_connection_match {
 	s32 flow_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
 	s32 return_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
 	s32 return_top_interface_num;	/* Store namely interface number to pass directly to RFS create rule. */
-
+	bool is_mcast_flow;		/* The flow is multicast or not */
 #endif
 	bool flow_accel;		/* The flow accelerated or not */
 };
@@ -338,8 +345,23 @@ struct sfe_ipv4_connection {
 
 /*
  * IPv4 connections and hash table size information.
+ * SFE_IPV4_CONNECTION_HASH_SHIFT is log2(SFE_MAX_CONNECTION_NUM), determined
+ * at compile time via preprocessor if-checks to avoid any runtime cost.
+ * SFE_MAX_CONNECTION_NUM must be a power of 2 between 512 and 8192.
  */
+#if (SFE_MAX_CONNECTION_NUM == 512)
+#define SFE_IPV4_CONNECTION_HASH_SHIFT 9
+#elif (SFE_MAX_CONNECTION_NUM == 1024)
+#define SFE_IPV4_CONNECTION_HASH_SHIFT 10
+#elif (SFE_MAX_CONNECTION_NUM == 2048)
+#define SFE_IPV4_CONNECTION_HASH_SHIFT 11
+#elif (SFE_MAX_CONNECTION_NUM == 4096)
 #define SFE_IPV4_CONNECTION_HASH_SHIFT 12
+#elif (SFE_MAX_CONNECTION_NUM == 8192)
+#define SFE_IPV4_CONNECTION_HASH_SHIFT 13
+#else
+#error "SFE_MAX_CONNECTION_NUM must be a power of 2 between 512 and 8192"
+#endif
 #define SFE_IPV4_CONNECTION_HASH_SIZE (1 << SFE_IPV4_CONNECTION_HASH_SHIFT)
 #define SFE_IPV4_CONNECTION_HASH_MASK (SFE_IPV4_CONNECTION_HASH_SIZE - 1)
 
@@ -421,6 +443,7 @@ enum sfe_ipv4_exception_events {
 	SFE_IPV4_EXCEPTION_EVENT_UDP_CHECKSUM_ERROR,
 	SFE_IPV4_EXCEPTION_EVENT_VXLAN_GPE_NO_ROUTE,
 	SFE_IPV4_EXCEPTION_EVENT_FLOW_DIR_NOT_ACCEL,
+	SFE_IPV4_EXCEPTION_EVENT_FLS_CREATE_FAILED,
 	SFE_IPV4_EXCEPTION_EVENT_LAST
 };
 
@@ -460,6 +483,9 @@ struct sfe_ipv4_stats {
 	u64 connection_create_requests_overflow64;	/* Number of IPV4 connection create requests after reaching max limit */
 	u64 bridge_vlan_passthrough_forwarded64;	/* Number of IPV4 bridge vlan passthrough packets forwarded */
 	u64 ppe_tun_vp_tx64;				/* Number of IPV4 packets queued to PPE tunnel VP  */
+#ifdef CONFIG_IPQ_PON
+	u64 ppe_veip_pon_vp_tx64;			/* Number of IPV4 packets queued to PPE VEIP GW VP */
+#endif
 };
 
 /*
